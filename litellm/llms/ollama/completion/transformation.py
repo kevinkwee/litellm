@@ -29,6 +29,11 @@ from litellm.types.utils import (
 
 from ..common_utils import OllamaError, OllamaModelInfo, _convert_image
 from ..chat.transformation import _map_reasoning_effort_to_think
+from ..duration_utils import (
+    attach_durations_to_chunk,
+    attach_durations_to_response,
+    extract_ollama_durations,
+)
 
 if TYPE_CHECKING:
     from litellm.litellm_core_utils.litellm_logging import Logging as _LiteLLMLoggingObj
@@ -336,6 +341,7 @@ class OllamaConfig(BaseConfig):
                 total_tokens=prompt_tokens + completion_tokens,
             ),
         )
+        attach_durations_to_response(model_response, extract_ollama_durations(response_json))
         return model_response
 
     def transform_request(

@@ -37,6 +37,11 @@ from litellm.types.llms.openai import (
 from litellm.types.utils import ModelResponse, ModelResponseStream
 
 from ..common_utils import OllamaError
+from ..duration_utils import (
+    attach_durations_to_chunk,
+    attach_durations_to_response,
+    extract_ollama_durations,
+)
 
 if TYPE_CHECKING:
     from litellm.litellm_core_utils.litellm_logging import Logging as _LiteLLMLoggingObj
@@ -429,6 +434,7 @@ class OllamaChatConfig(BaseConfig):
                 total_tokens=prompt_tokens + completion_tokens,
             ),
         )
+        attach_durations_to_response(model_response, extract_ollama_durations(response_json))
         return model_response
 
     def get_error_class(self, error_message: str, status_code: int, headers: Union[dict, Headers]) -> BaseLLMException:
@@ -558,7 +564,7 @@ class OllamaChatCompletionResponseIterator(BaseModelResponseIterator):
                 total_tokens=chunk.get("prompt_eval_count", 0) + chunk.get("eval_count", 0),
             )
 
-            return ModelResponseStream(
+            model_response_stream = ModelResponseStream(
                 id=str(uuid.uuid4()),
                 object="chat.completion.chunk",
                 created=int(time.time()),  # ollama created_at is in UTC
@@ -566,6 +572,9 @@ class OllamaChatCompletionResponseIterator(BaseModelResponseIterator):
                 model=chunk["model"],
                 choices=choices,
             )
+            if chunk.get("done") is True:
+                attach_durations_to_chunk(model_response_stream, extract_ollama_durations(chunk))
+            return model_response_stream
         except KeyError as e:
             raise OllamaError(
                 message=f"KeyError: {e}, Got unexpected response from Ollama: {chunk}",

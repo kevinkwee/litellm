@@ -6,9 +6,7 @@ from typing import cast
 import pytest
 from pydantic import BaseModel
 
-sys.path.insert(
-    0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../.."))
-)
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../..")))
 
 from litellm.llms.ollama.chat.transformation import (
     OllamaChatConfig,
@@ -45,9 +43,9 @@ class TestOllamaChatConfigResponseFormat:
         expected_schema_structure = TestEvent.model_json_schema()
         transformed_format.pop("additionalProperties")
 
-        assert (
-            transformed_format == expected_schema_structure
-        ), f"Transformed schema does not match expected. Got: {transformed_format}, Expected: {expected_schema_structure}"
+        assert transformed_format == expected_schema_structure, (
+            f"Transformed schema does not match expected. Got: {transformed_format}, Expected: {expected_schema_structure}"
+        )
 
     def test_map_openai_params_with_dict_json_schema(self):
         config = OllamaChatConfig()
@@ -67,9 +65,9 @@ class TestOllamaChatConfigResponseFormat:
         )
 
         assert "format" in optional_params
-        assert (
-            optional_params["format"] == direct_schema
-        ), f"Schema from dict did not pass through correctly. Got: {optional_params['format']}, Expected: {direct_schema}"
+        assert optional_params["format"] == direct_schema, (
+            f"Schema from dict did not pass through correctly. Got: {optional_params['format']}, Expected: {direct_schema}"
+        )
 
     def test_map_openai_params_with_json_object(self):
         optional_params = get_optional_params(
@@ -79,9 +77,9 @@ class TestOllamaChatConfigResponseFormat:
         )
 
         assert "format" in optional_params
-        assert (
-            optional_params["format"] == "json"
-        ), f"Expected 'json' for type 'json_object', got: {optional_params['format']}"
+        assert optional_params["format"] == "json", (
+            f"Expected 'json' for type 'json_object', got: {optional_params['format']}"
+        )
 
     def test_transform_request_loads_config_parameters(self):
         """Test that transform_request loads config parameters without overriding existing optional_params"""
@@ -150,9 +148,7 @@ class TestOllamaChatConfigResponseFormat:
         config = OllamaChatConfig()
 
         # Test message with content as string
-        messages = cast(
-            list[AllMessageValues], [{"role": "user", "content": "Hello world!"}]
-        )
+        messages = cast(list[AllMessageValues], [{"role": "user", "content": "Hello world!"}])
 
         result = config.transform_request(
             model="llama2",
@@ -201,9 +197,7 @@ class TestOllamaChatConfigResponseFormat:
                         {"type": "text", "text": "What's in this image?"},
                         {
                             "type": "image_url",
-                            "image_url": {
-                                "url": "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQ..."
-                            },
+                            "image_url": {"url": "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQ..."},
                         },
                     ],
                 }
@@ -243,9 +237,7 @@ class TestOllamaChatConfigResponseFormat:
                         {"type": "text", "text": "Compare these images:"},
                         {
                             "type": "image_url",
-                            "image_url": {
-                                "url": "data:image/jpeg;base64,image1data..."
-                            },
+                            "image_url": {"url": "data:image/jpeg;base64,image1data..."},
                         },
                         {"type": "text", "text": " and "},
                         {
@@ -370,9 +362,7 @@ class TestOllamaToolCalling:
         assert optional_params["tools"] == tools
         # Should NOT trigger the broken fallback
         assert "functions_unsupported_model" not in optional_params
-        assert (
-            "format" not in optional_params or optional_params.get("format") != "json"
-        )
+        assert "format" not in optional_params or optional_params.get("format") != "json"
 
     def test_finish_reason_tool_calls_non_streaming(self):
         """Test that finish_reason is set to 'tool_calls' when tool_calls present.
@@ -529,9 +519,9 @@ class TestOllamaFinishReasonLength:
             json_mode=False,
         )
 
-        assert (
-            result.choices[0].finish_reason == "length"
-        ), f"Expected 'length' when done_reason='length', got '{result.choices[0].finish_reason}'"
+        assert result.choices[0].finish_reason == "length", (
+            f"Expected 'length' when done_reason='length', got '{result.choices[0].finish_reason}'"
+        )
 
     def test_finish_reason_stop_non_streaming(self):
         """Non-streaming: done_reason='stop' (natural finish) must stay 'stop'."""
@@ -570,9 +560,9 @@ class TestOllamaFinishReasonLength:
             json_mode=False,
         )
 
-        assert (
-            result.choices[0].finish_reason == "stop"
-        ), f"Expected 'stop' for natural finish, got '{result.choices[0].finish_reason}'"
+        assert result.choices[0].finish_reason == "stop", (
+            f"Expected 'stop' for natural finish, got '{result.choices[0].finish_reason}'"
+        )
 
     def test_finish_reason_length_streaming(self):
         """Streaming: done_reason='length' in final chunk must produce finish_reason='length'."""
@@ -593,9 +583,9 @@ class TestOllamaFinishReasonLength:
 
         result = iterator.chunk_parser(done_chunk)
 
-        assert (
-            result.choices[0].finish_reason == "length"
-        ), f"Expected 'length' when done_reason='length', got '{result.choices[0].finish_reason}'"
+        assert result.choices[0].finish_reason == "length", (
+            f"Expected 'length' when done_reason='length', got '{result.choices[0].finish_reason}'"
+        )
 
     def test_finish_reason_stop_streaming(self):
         """Streaming: done_reason='stop' in final chunk must produce finish_reason='stop'."""
@@ -613,9 +603,9 @@ class TestOllamaFinishReasonLength:
 
         result = iterator.chunk_parser(done_chunk)
 
-        assert (
-            result.choices[0].finish_reason == "stop"
-        ), f"Expected 'stop' for natural finish, got '{result.choices[0].finish_reason}'"
+        assert result.choices[0].finish_reason == "stop", (
+            f"Expected 'stop' for natural finish, got '{result.choices[0].finish_reason}'"
+        )
 
 
 class TestOllamaReasoningContentStreaming:
@@ -660,7 +650,7 @@ class TestOllamaReasoningContentStreaming:
 
         # Verify none of them are None
         for i, rc in enumerate(reasoning_contents):
-            assert rc is not None, f"Chunk {i+1} reasoning_content should not be None"
+            assert rc is not None, f"Chunk {i + 1} reasoning_content should not be None"
 
     def test_thinking_to_content_transition(self):
         """
@@ -678,9 +668,7 @@ class TestOllamaReasoningContentStreaming:
             "done": False,
         }
         result1 = iterator.chunk_parser(thinking_chunk)
-        assert (
-            result1.choices[0].delta.reasoning_content == "Let me think about this..."
-        )
+        assert result1.choices[0].delta.reasoning_content == "Let me think about this..."
         assert result1.choices[0].delta.content is None
 
         # Then: regular content chunk
@@ -984,3 +972,88 @@ class TestOllamaReasoningEffortToThinkMapping:
             drop_params=False,
         )
         assert "think" not in optional_params
+
+
+class TestOllamaDurationsSurfaced:
+    """Ollama's native GPU-time fields must reach _hidden_params so a custom
+    callback can accumulate real GPU time (not wall-clock) per deployment.
+
+    Ollama returns total_duration/load_duration/prompt_eval_duration/eval_duration
+    in nanoseconds on the final done:true chunk. Without these surfacing, a
+    duration-based balancer would have to fall back to wall-clock request time,
+    which over-counts network/overhead and misleads both the protective limit
+    and the discovery tracker.
+    """
+
+    @staticmethod
+    def _done_response_with_durations() -> dict:
+        return {
+            "model": "glm-5.2:cloud",
+            "created_at": "2026-07-15T00:00:00Z",
+            "message": {"role": "assistant", "content": "hi"},
+            "done": True,
+            "done_reason": "stop",
+            "total_duration": 1_500_000_000,
+            "load_duration": 200_000_000,
+            "prompt_eval_duration": 300_000_000,
+            "eval_duration": 1_000_000_000,
+            "prompt_eval_count": 5,
+            "eval_count": 10,
+        }
+
+    def test_transform_response_stashes_gpu_time_on_hidden_params(self):
+        from unittest.mock import MagicMock
+
+        config = OllamaChatConfig()
+        ollama_response = self._done_response_with_durations()
+        mock_response = MagicMock()
+        mock_response.json.return_value = ollama_response
+        mock_response.text = json.dumps(ollama_response)
+
+        model_response = ModelResponse()
+        model_response.choices = [Choices(message=Message(content=""), index=0)]
+
+        result = config.transform_response(
+            model="glm-5.2:cloud",
+            raw_response=mock_response,
+            model_response=model_response,
+            logging_obj=MagicMock(),
+            request_data={},
+            messages=[{"role": "user", "content": "hi"}],
+            optional_params={},
+            litellm_params={},
+            encoding=None,
+            api_key=None,
+            json_mode=False,
+        )
+
+        psf = result._hidden_params["provider_specific_fields"]
+        durations = psf["ollama_durations"]
+        assert durations["eval_seconds"] == pytest.approx(1.0)
+        assert durations["prompt_eval_seconds"] == pytest.approx(0.3)
+        assert psf["gpu_time_seconds"] == pytest.approx(1.3)
+
+    def test_chunk_parser_stashes_gpu_time_on_final_done_chunk(self):
+        iterator = OllamaChatCompletionResponseIterator(streaming_response=iter([]), sync_stream=True, json_mode=False)
+        final_chunk = self._done_response_with_durations()
+
+        parsed = iterator.chunk_parser(final_chunk)
+
+        psf = parsed._hidden_params["provider_specific_fields"]
+        assert psf["gpu_time_seconds"] == pytest.approx(1.3)
+        assert psf["ollama_durations"]["eval_seconds"] == pytest.approx(1.0)
+
+    def test_chunk_parser_does_not_attach_on_intermediate_chunk(self):
+        iterator = OllamaChatCompletionResponseIterator(streaming_response=iter([]), sync_stream=True, json_mode=False)
+        intermediate = {
+            "model": "glm-5.2:cloud",
+            "created_at": "2026-07-15T00:00:00Z",
+            "message": {"role": "assistant", "content": "hel"},
+            "done": False,
+        }
+
+        parsed = iterator.chunk_parser(intermediate)
+
+        psf = parsed._hidden_params.get("provider_specific_fields", {})
+        assert "ollama_durations" not in psf
+        assert "gpu_time_seconds" not in psf
