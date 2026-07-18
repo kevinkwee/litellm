@@ -32,7 +32,10 @@ def extract_ollama_durations(response_json: dict) -> OllamaDurations:
 
 
 def gpu_time_seconds(durations: OllamaDurations) -> float:
-    return durations["prompt_eval_seconds"] + durations["eval_seconds"]
+    breakdown = durations["prompt_eval_seconds"] + durations["eval_seconds"]
+    if breakdown > 0:
+        return breakdown
+    return max(durations["total_seconds"] - durations["load_seconds"], 0.0)
 
 
 def attach_durations_to_response(model_response: ModelResponse, durations: OllamaDurations) -> None:
@@ -47,3 +50,4 @@ def attach_durations_to_chunk(chunk: ModelResponseStream, durations: OllamaDurat
     provider_specific[OLLAMA_DURATIONS_KEY] = durations
     provider_specific[_GPU_TIME_KEY] = gpu_time_seconds(durations)
     chunk._hidden_params["provider_specific_fields"] = provider_specific
+    chunk.provider_specific_fields = provider_specific

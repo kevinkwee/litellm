@@ -7,6 +7,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../.
 
 from litellm.llms.ollama.duration_utils import (
     OLLAMA_DURATIONS_KEY,
+    OllamaDurations,
     extract_ollama_durations,
     gpu_time_seconds,
     attach_durations_to_response,
@@ -39,9 +40,36 @@ class TestExtractOllamaDurations:
         assert durations["prompt_eval_seconds"] == pytest.approx(0.3)
         assert durations["eval_seconds"] == pytest.approx(1.0)
 
-    def test_gpu_time_is_prompt_eval_plus_eval(self):
+    def test_gpu_time_is_prompt_eval_plus_eval_when_breakdown_present(self):
         durations = extract_ollama_durations(_ollama_done_response())
         assert gpu_time_seconds(durations) == pytest.approx(1.3)
+
+    def test_gpu_time_falls_back_to_total_minus_load_when_breakdown_absent(self):
+        durations = OllamaDurations(
+            total_seconds=3.0,
+            load_seconds=0.0,
+            prompt_eval_seconds=0.0,
+            eval_seconds=0.0,
+        )
+        assert gpu_time_seconds(durations) == pytest.approx(3.0)
+
+    def test_gpu_time_falls_back_to_total_minus_load_with_real_load(self):
+        durations = OllamaDurations(
+            total_seconds=3.0,
+            load_seconds=0.5,
+            prompt_eval_seconds=0.0,
+            eval_seconds=0.0,
+        )
+        assert gpu_time_seconds(durations) == pytest.approx(2.5)
+
+    def test_gpu_time_never_negative_when_load_exceeds_total(self):
+        durations = OllamaDurations(
+            total_seconds=1.0,
+            load_seconds=2.0,
+            prompt_eval_seconds=0.0,
+            eval_seconds=0.0,
+        )
+        assert gpu_time_seconds(durations) == 0.0
 
     def test_missing_duration_fields_yield_zero(self):
         durations = extract_ollama_durations({"model": "x", "done": True})

@@ -20,7 +20,7 @@ import json
 from unittest.mock import MagicMock
 
 import litellm
-from litellm.types.utils import Choices, Message, ModelResponse
+from litellm.types.utils import Choices, Message, ModelResponse, ModelResponseStream, StreamingChoices, Delta
 
 
 class TestEvent(BaseModel):
@@ -1057,3 +1057,42 @@ class TestOllamaDurationsSurfaced:
         psf = parsed._hidden_params.get("provider_specific_fields", {})
         assert "ollama_durations" not in psf
         assert "gpu_time_seconds" not in psf
+
+    def test_apply_assembled_streaming_response_metadata_propagates_durations(self):
+        iterator = OllamaChatCompletionResponseIterator(streaming_response=iter([]), sync_stream=True, json_mode=False)
+        final_chunk = self._done_response_with_durations()
+        parsed_final = iterator.chunk_parser(final_chunk)
+
+        intermediate = {
+            "model": "glm-5.2:cloud",
+            "created_at": "2026-07-15T00:00:00Z",
+            "message": {"role": "assistant", "content": "hel"},
+            "done": False,
+        }
+        parsed_intermediate = iterator.chunk_parser(intermediate)
+
+        assembled = ModelResponse(id="asm1", created=1, model="glm-5.2:cloud", object="chat.completion", choices=[])
+
+        config = OllamaChatConfig()
+        config.apply_assembled_streaming_response_metadata(
+            response=assembled, chunks=[parsed_intermediate, parsed_final]
+        )
+
+        psf = assembled._hidden_params["provider_specific_fields"]
+        assert psf["gpu_time_seconds"] == pytest.approx(1.3)
+        assert psf["ollama_durations"]["eval_seconds"] == pytest.approx(1.0)
+
+    def test_apply_assembled_streaming_response_metadata_noop_without_durations(self):
+        chunk_without_durations = ModelResponseStream(
+            id="c1",
+            created=1,
+            model="m",
+            object="chat.completion.chunk",
+            choices=[StreamingChoices(delta=Delta(content="hi"))],
+        )
+        assembled = ModelResponse(id="asm1", created=1, model="glm-5.2:cloud", object="chat.completion", choices=[])
+
+        config = OllamaChatConfig()
+        config.apply_assembled_streaming_response_metadata(response=assembled, chunks=[chunk_without_durations])
+
+        assert assembled._hidden_params.get("provider_specific_fields") is None

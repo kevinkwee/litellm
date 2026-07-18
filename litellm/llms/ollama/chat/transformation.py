@@ -38,6 +38,7 @@ from litellm.types.utils import ModelResponse, ModelResponseStream
 
 from ..common_utils import OllamaError
 from ..duration_utils import (
+    OLLAMA_DURATIONS_KEY,
     attach_durations_to_chunk,
     attach_durations_to_response,
     extract_ollama_durations,
@@ -439,6 +440,17 @@ class OllamaChatConfig(BaseConfig):
 
     def get_error_class(self, error_message: str, status_code: int, headers: Union[dict, Headers]) -> BaseLLMException:
         return OllamaError(status_code=status_code, message=error_message, headers=headers)
+
+    def apply_assembled_streaming_response_metadata(
+        self,
+        response: ModelResponse,
+        chunks: List[Any],
+    ) -> None:
+        for chunk in reversed(chunks):
+            provider_specific = getattr(chunk, "provider_specific_fields", None)
+            if provider_specific and OLLAMA_DURATIONS_KEY in provider_specific:
+                response._hidden_params.setdefault("provider_specific_fields", {}).update(provider_specific)
+                return
 
     def get_model_response_iterator(
         self,
