@@ -55,6 +55,154 @@ else:
 _OLLAMA_THINK_LEVELS: tuple[str, ...] = ("low", "medium", "high", "max")
 
 
+def _validate_ollama_tool_call_structure(tool_call: dict, context: dict) -> None:
+    """Strict structural validation of an Ollama tool_call.
+
+    Ollama's on-wire format for tool_calls (verified against GLM-5.2
+    via Ollama Cloud, captured 2026-07-26) is:
+
+        {"id": "call_2k0nylt2",
+         "function": {"index": 0, "name": "get_weather",
+                       "arguments": {"location": "Jakarta"}}}
+
+    This transformer relies on the following fields being present and
+    correctly shaped:
+      - `tool_call["id"]` (top-level, string) — needed for tool_result
+        correlation in the next turn. We do NOT silently generate a
+        replacement UUID when it's missing (that would hide a
+        structural change in Ollama's response).
+      - `tool_call["function"]` (dict) — needed to access
+        `function.index`, `function.name`, `function.arguments`.
+      - `tool_call["function"]["index"]` (int) — needed to promote to
+        top-level `tool_call["index"]` so the streaming chunk builder
+        (`get_combined_tool_content`) keys parallel tool_calls by
+        distinct slots. Without it, all parallel tool_calls collapse
+        to `index=0` and their arguments get concatenated into
+        broken JSON.
+      - `tool_call["function"]["name"]` (string) — needed by the
+        downstream aggregator to build the final tool_call.
+      - `tool_call["function"]["arguments"]` (dict or string) —
+        needed to determine if the function call is complete and to
+        seed the final tool_call's arguments.
+
+    If any of these fields are missing or wrongly typed, we raise an
+    `OllamaError` (HTTP 400) with a message that names the missing
+    field and shows the offending context (chunk for streaming, full
+    response for non-streaming). This makes structural changes in
+    Ollama's response format immediately visible instead of silently
+    producing wrong results (e.g. parallel tool_calls merging into one
+    entry with broken JSON arguments, or tool_result correlation
+    breaking in the next turn).
+
+    We deliberately do NOT support backward compatibility with older
+    Ollama versions that did not send `id` or `function.index`. If
+    Ollama changes its response structure, this validation will fail
+    loud so the transformer can be updated explicitly.
+
+    Args:
+        tool_call: The tool_call dict to validate.
+        context: The enclosing chunk (streaming) or full response
+            message (non-streaming) that contains the tool_call. Used
+            only for the error message to help debugging.
+    """
+    # `function` must be a dict (not None, not missing, not non-dict).
+    function = tool_call.get("function")
+    if not isinstance(function, dict):
+        raise OllamaError(
+            message=(
+                "Ollama tool_call is missing a `function` dict. "
+                f"Got function={function!r}. "
+                "This transformer expects Ollama's tool_call format: "
+                '{"id": "...", "function": {"index": <int>, "name": "...", '
+                '"arguments": {...}}}. If Ollama changed its response '
+                "structure, update litellm/llms/ollama/chat/transformation.py "
+                f"accordingly. Offending context: {context}",
+            ),
+            status_code=400,
+            headers={"Content-Type": "application/json"},
+        )
+
+    # `id` must be present at top-level and be a string. We rely on it
+    # for tool_result correlation in the next turn; silently generating
+    # a replacement UUID would hide a structural change.
+    tool_call_id = tool_call.get("id")
+    if not isinstance(tool_call_id, str) or not tool_call_id:
+        raise OllamaError(
+            message=(
+                "Ollama tool_call is missing a top-level string `id`. "
+                f"Got id={tool_call_id!r}. "
+                "This transformer preserves Ollama's `id` for tool_result "
+                "correlation in the next turn and does NOT silently "
+                "generate a replacement UUID. If Ollama renamed or "
+                "removed the `id` field, update "
+                "litellm/llms/ollama/chat/transformation.py accordingly. "
+                f"Offending context: {context}",
+            ),
+            status_code=400,
+            headers={"Content-Type": "application/json"},
+        )
+
+    # `function.index` must be present and be an int. We promote it to
+    # top-level `tool_call["index"]` so the streaming chunk builder
+    # keys parallel tool_calls by distinct slots.
+    function_index = function.get("index")
+    if not isinstance(function_index, int) or isinstance(function_index, bool):
+        raise OllamaError(
+            message=(
+                "Ollama tool_call.function is missing an integer `index`. "
+                f"Got function.index={function_index!r} (type {type(function_index).__name__}). "
+                "This transformer promotes `function.index` to top-level "
+                "`tool_call.index` so parallel tool_calls get distinct "
+                "slots in the streaming chunk builder. Without it, all "
+                "parallel tool_calls collapse to index=0 and their "
+                "arguments get concatenated into broken JSON. If Ollama "
+                "renamed or moved the `index` field, update "
+                "litellm/llms/ollama/chat/transformation.py accordingly. "
+                f"Offending context: {context}",
+            ),
+            status_code=400,
+            headers={"Content-Type": "application/json"},
+        )
+
+    # `function.name` must be present and be a non-empty string.
+    function_name = function.get("name")
+    if not isinstance(function_name, str) or not function_name:
+        raise OllamaError(
+            message=(
+                "Ollama tool_call.function is missing a non-empty string "
+                f"`name`. Got function.name={function_name!r}. "
+                "The downstream aggregator needs the function name to "
+                "build the final tool_call. If Ollama renamed or removed "
+                "the `name` field, update "
+                "litellm/llms/ollama/chat/transformation.py accordingly. "
+                f"Offending context: {context}",
+            ),
+            status_code=400,
+            headers={"Content-Type": "application/json"},
+        )
+
+    # `function.arguments` must be present (dict or non-empty string).
+    # We accept both because Ollama natively sends a dict, but legacy
+    # paths may send a JSON string.
+    function_args = function.get("arguments")
+    if not isinstance(function_args, (dict, str)) or (isinstance(function_args, str) and not function_args):
+        raise OllamaError(
+            message=(
+                "Ollama tool_call.function is missing `arguments` "
+                f"(dict or non-empty string). Got function.arguments="
+                f"{function_args!r} (type {type(function_args).__name__}). "
+                "The transformer needs arguments to determine if the "
+                "function call is complete and to seed the final "
+                "tool_call's arguments. If Ollama renamed or removed "
+                "the `arguments` field, update "
+                "litellm/llms/ollama/chat/transformation.py accordingly. "
+                f"Offending context: {context}",
+            ),
+            status_code=400,
+            headers={"Content-Type": "application/json"},
+        )
+
+
 def _map_reasoning_effort_to_think(value: Any, model: str) -> Union[bool, str]:
     if not isinstance(value, str):
         return bool(value)
@@ -413,6 +561,17 @@ class OllamaChatConfig(BaseConfig):
             model_response.choices[0].message = message  # type: ignore
             model_response.choices[0].finish_reason = "tool_calls"
         else:
+            # Strict validation: if Ollama's tool_call structure changed,
+            # fail loud so the issue is visible (consistent with the
+            # streaming path). See `_validate_ollama_tool_call_structure`
+            # for the rationale. We validate BEFORE constructing the
+            # `Message` so the error message points to the right file to
+            # update, instead of a generic pydantic ValidationError.
+            _tool_calls = response_json_message.get("tool_calls") if response_json_message else None
+            if _tool_calls is not None:
+                for _tool_call in _tool_calls:
+                    _validate_ollama_tool_call_structure(_tool_call, response_json)
+
             _message = litellm.Message(**response_json_message)
             model_response.choices[0].message = _message  # type: ignore
             # Set finish_reason to "tool_calls" when tool_calls are present
@@ -469,56 +628,91 @@ class OllamaChatCompletionResponseIterator(BaseModelResponseIterator):
     started_reasoning_content: bool = False
     finished_reasoning_content: bool = False
 
-    def _is_function_call_complete(self, function_args: Union[str, dict]) -> bool:
-        if isinstance(function_args, dict):
-            return True
-        try:
-            json.loads(function_args)
-            return True
-        except Exception:
-            return False
-
     def chunk_parser(self, chunk: dict) -> ModelResponseStream:
         try:
             """
-            Expected chunk format:
+            Expected chunk format (current Ollama / Ollama Cloud):
             {
-                "model": "llama3.1",
-                "created_at": "2025-05-24T02:12:05.859654Z",
+                "model": "glm-5.2:cloud",
+                "created_at": "...",
                 "message": {
                     "role": "assistant",
                     "content": "",
                     "tool_calls": [{
+                        "id": "call_2k0nylt2",
                         "function": {
-                            "name": "get_latest_album_ratings",
-                            "arguments": {
-                                "artist_name": "Taylor Swift"
-                            }
+                            "index": 0,
+                            "name": "get_weather",
+                            "arguments": {"location": "Jakarta"}
                         }
                     }]
                 },
-                "done_reason": "stop",
-                "done": true,
+                "done": false,
                 ...
             }
 
+            Ollama puts `index` INSIDE `function` and `id` at the top level
+            of each tool_call. OpenAI's streaming protocol (and LiteLLM's
+            `get_combined_tool_content` in
+            `litellm_core_utils/streaming_chunk_builder_utils.py`) keys
+            tool_calls by the TOP-LEVEL `index`. Without promotion, every
+            chunk's tool_call defaults to `index=0` in `Delta.__init__`
+            (which resets `current_index=0` per construction), and all
+            parallel tool_calls collapse into one slot with concatenated
+            (broken JSON) arguments.
+
             Need to:
             - convert 'message' to 'delta'
+            - validate the structural shape of each tool_call (fail loud
+              if Ollama changes its response format — see
+              `_validate_tool_call_structure`)
+            - promote `function.index` to top-level `tool_call["index"]`
+              (OpenAI streaming protocol requires top-level index)
+            - preserve `tool_call["id"]` from Ollama (do NOT overwrite
+              with a random UUID — that breaks tool_result correlation
+              in the next turn)
             - return finish_reason when done is true
             - return usage when done is true
 
+            We deliberately do NOT support backward compatibility with
+            older Ollama versions that did not send `id` or `function.index`.
+            If Ollama changes its response structure, the validation in
+            `_validate_tool_call_structure` will fail the request loudly so
+            the transformer can be updated explicitly.
             """
             from litellm.types.utils import Delta, StreamingChoices
 
-            # process tool calls - if complete function arg - add id to tool call
+            # process tool calls - validate structure, promote function.index
+            # to top-level tool_call["index"], preserve Ollama's id.
             tool_calls = chunk["message"].get("tool_calls")
             if tool_calls is not None:
                 for tool_call in tool_calls:
-                    function_args = tool_call.get("function").get("arguments")
-                    if function_args is not None and len(function_args) > 0:
-                        is_function_call_complete = self._is_function_call_complete(function_args)
-                        if is_function_call_complete:
-                            tool_call["id"] = str(uuid.uuid4())
+                    # Fail loud if Ollama's tool_call structure changed.
+                    # This catches: missing/null `function`, missing/wrong-
+                    # type `id`, missing/wrong-type `function.index`,
+                    # missing `function.name`, missing/wrong-type
+                    # `function.arguments`. See the docstring of
+                    # `_validate_ollama_tool_call_structure` for the
+                    # rationale (each field is required for correct
+                    # behavior of this transformer and the downstream
+                    # streaming chunk builder).
+                    _validate_ollama_tool_call_structure(tool_call, chunk)
+
+                    function = tool_call["function"]
+
+                    # 1) Promote `function.index` to top-level
+                    #    `tool_call["index"]`. OpenAI's streaming protocol
+                    #    (and LiteLLM's `get_combined_tool_content`) keys
+                    #    tool_calls by the top-level `index`. Ollama puts
+                    #    it inside `function`.
+                    if tool_call.get("index", None) is None:
+                        tool_call["index"] = function["index"]
+
+                    # 2) `id` is already present and validated as a string
+                    #    by `_validate_tool_call_structure`. We preserve it
+                    #    as-is — do NOT overwrite with a random UUID. The
+                    #    id is needed for tool_result correlation in the
+                    #    next turn.
 
             # PROCESS REASONING CONTENT
             reasoning_content: Optional[str] = None
