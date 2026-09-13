@@ -649,6 +649,12 @@ def _assert_openrouter_streaming_cost(assembled_response: ModelResponse, logging
     }
     assert assembled_response._hidden_params["additional_headers"]["llm_provider-x-litellm-response-cost"] == 0.0009642
     assert logging_obj._response_cost_calculator(result=assembled_response) == 0.0009642
+    assert logging_obj.cost_breakdown == {
+        "input_cost": 0.0000182,
+        "output_cost": 0.000946,
+        "total_cost": 0.0009642,
+        "tool_usage_cost": 0,
+    }
 
 
 def _openrouter_streaming_logging_obj() -> Logging:
@@ -706,3 +712,56 @@ def test_openrouter_streaming_cost_missing_cost_chunk():
 
     assert getattr(assembled_response.usage, "cost", None) is None
     assert "llm_provider-x-litellm-response-cost" not in assembled_response._hidden_params.get("additional_headers", {})
+
+
+def test_openrouter_streaming_cost_breakdown_includes_upstream_margin():
+    """
+    OpenRouter can charge more than the upstream inference cost. The margin
+    gets its own row so the breakdown still sums to the reported total.
+    """
+    logging_obj = _openrouter_streaming_logging_obj()
+
+    chunks = _build_openrouter_stream_chunks(with_reasoning=False)
+    chunks[-1].usage = Usage(
+        prompt_tokens=13,
+        completion_tokens=215,
+        total_tokens=228,
+        cost=0.0010642,
+        cost_details={
+            "upstream_inference_cost": 0.0009642,
+            "upstream_inference_prompt_cost": 0.0000182,
+            "upstream_inference_completions_cost": 0.000946,
+        },
+    )
+
+    assembled_response = litellm.stream_chunk_builder(
+        chunks=chunks,
+        messages=[{"role": "user", "content": "hi"}],
+        logging_obj=logging_obj,
+    )
+
+    assert logging_obj._response_cost_calculator(result=assembled_response) == 0.0010642
+    assert logging_obj.cost_breakdown["input_cost"] == 0.0000182
+    assert logging_obj.cost_breakdown["output_cost"] == 0.000946
+    assert logging_obj.cost_breakdown["total_cost"] == 0.0010642
+    assert logging_obj.cost_breakdown["additional_costs"] == {"upstream_margin": pytest.approx(0.0001)}
+
+
+def test_openrouter_streaming_cost_without_cost_details_has_no_breakdown():
+    """
+    A reported cost without cost_details must keep spend working while
+    leaving the cost breakdown empty instead of fabricating one.
+    """
+    logging_obj = _openrouter_streaming_logging_obj()
+
+    chunks = _build_openrouter_stream_chunks(with_reasoning=False)
+    chunks[-1].usage = Usage(prompt_tokens=13, completion_tokens=215, total_tokens=228, cost=0.0009642)
+
+    assembled_response = litellm.stream_chunk_builder(
+        chunks=chunks,
+        messages=[{"role": "user", "content": "hi"}],
+        logging_obj=logging_obj,
+    )
+
+    assert logging_obj._response_cost_calculator(result=assembled_response) == 0.0009642
+    assert logging_obj.cost_breakdown is None

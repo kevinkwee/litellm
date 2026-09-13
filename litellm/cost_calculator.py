@@ -29,8 +29,8 @@ from litellm.litellm_core_utils.llm_cost_calc.utils import (
     _parse_prompt_tokens_details,
     calculate_cost_component,
     generic_cost_per_token,
-    get_token_type_cost_breakdown,
     get_billable_input_tokens,
+    get_token_type_cost_breakdown,
     select_cost_metric_for_model,
 )
 from litellm.llms.anthropic.cost_calculation import (
@@ -52,9 +52,6 @@ from litellm.llms.databricks.cost_calculator import (
 from litellm.llms.deepseek.cost_calculator import (
     cost_per_token as deepseek_cost_per_token,
 )
-from litellm.llms.tencent.cost_calculator import (
-    cost_per_token as tencent_cost_per_token,
-)
 from litellm.llms.fireworks_ai.cost_calculator import (
     cost_per_token as fireworks_ai_cost_per_token,
 )
@@ -64,11 +61,18 @@ from litellm.llms.lemonade.cost_calculator import (
 )
 from litellm.llms.openai.cost_calculation import (
     _video_output_cost_per_second,
+)
+from litellm.llms.openai.cost_calculation import (
     cost_per_second as openai_cost_per_second,
+)
+from litellm.llms.openai.cost_calculation import (
     cost_per_token as openai_cost_per_token,
 )
 from litellm.llms.perplexity.cost_calculator import (
     cost_per_token as perplexity_cost_per_token,
+)
+from litellm.llms.tencent.cost_calculator import (
+    cost_per_token as tencent_cost_per_token,
 )
 from litellm.llms.together_ai.cost_calculator import get_model_params_and_category
 from litellm.llms.vertex_ai.cost_calculator import (
@@ -1701,6 +1705,33 @@ def get_response_cost_from_hidden_params(
     return None
 
 
+def _store_openrouter_cost_details_breakdown(
+    response_object: BaseModel,
+    litellm_logging_obj: Optional[LitellmLoggingObject],
+) -> None:
+    """Store OpenRouter's reported prompt/completions cost split on the logging object's cost breakdown."""
+    if litellm_logging_obj is None:
+        return
+    usage = getattr(response_object, "usage", None)
+    cost_details = getattr(usage, "cost_details", None)
+    if not isinstance(cost_details, dict):
+        return
+    upstream_cost = cost_details.get("upstream_inference_cost")
+    prompt_cost = cost_details.get("upstream_inference_prompt_cost")
+    completions_cost = cost_details.get("upstream_inference_completions_cost")
+    total_cost = getattr(usage, "cost", None)
+    if upstream_cost is None or prompt_cost is None or completions_cost is None or total_cost is None:
+        return
+    margin = round(float(total_cost) - float(upstream_cost), 12)
+    litellm_logging_obj.set_cost_breakdown(
+        input_cost=float(prompt_cost),
+        output_cost=float(completions_cost),
+        total_cost=float(total_cost),
+        cost_for_built_in_tools_cost_usd_dollar=0,
+        additional_costs={"upstream_margin": margin} if margin > 0 else None,
+    )
+
+
 def response_cost_calculator(
     response_object: Union[
         ModelResponse,
@@ -1766,6 +1797,10 @@ def response_cost_calculator(
                     response_object._hidden_params["optional_params"] = optional_params
                     provider_response_cost = get_response_cost_from_hidden_params(response_object._hidden_params)
                     if provider_response_cost is not None:
+                        _store_openrouter_cost_details_breakdown(
+                            response_object=response_object,
+                            litellm_logging_obj=litellm_logging_obj,
+                        )
                         return provider_response_cost
 
             response_cost = completion_cost(
