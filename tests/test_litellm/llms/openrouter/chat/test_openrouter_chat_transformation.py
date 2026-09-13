@@ -4,23 +4,28 @@ import sys
 import httpx
 import pytest
 
-sys.path.insert(
-    0, os.path.abspath("../../../../..")
-)  # Adds the parent directory to the system path
+sys.path.insert(0, os.path.abspath("../../../../.."))  # Adds the parent directory to the system path
 
+import litellm
+from litellm.litellm_core_utils.litellm_logging import Logging
 from litellm.llms.openai.chat.gpt_transformation import OpenAIGPTConfig
 from litellm.llms.openrouter.chat.transformation import (
     OpenRouterChatCompletionStreamingHandler,
     OpenrouterConfig,
     OpenRouterException,
 )
+from litellm.types.utils import (
+    Delta,
+    ModelResponse,
+    ModelResponseStream,
+    StreamingChoices,
+    Usage,
+)
 
 
 class TestOpenRouterChatCompletionStreamingHandler:
     def test_chunk_parser_successful(self):
-        handler = OpenRouterChatCompletionStreamingHandler(
-            streaming_response=None, sync_stream=True
-        )
+        handler = OpenRouterChatCompletionStreamingHandler(streaming_response=None, sync_stream=True)
 
         # Test input chunk
         chunk = {
@@ -28,9 +33,7 @@ class TestOpenRouterChatCompletionStreamingHandler:
             "created": 1234567890,
             "model": "test_model",
             "usage": {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30},
-            "choices": [
-                {"delta": {"content": "test content", "reasoning": "test reasoning"}}
-            ],
+            "choices": [{"delta": {"content": "test content", "reasoning": "test reasoning"}}],
         }
 
         # Parse chunk
@@ -48,9 +51,7 @@ class TestOpenRouterChatCompletionStreamingHandler:
         assert result.choices[0]["delta"]["reasoning_content"] == "test reasoning"
 
     def test_chunk_parser_error_response(self):
-        handler = OpenRouterChatCompletionStreamingHandler(
-            streaming_response=None, sync_stream=True
-        )
+        handler = OpenRouterChatCompletionStreamingHandler(streaming_response=None, sync_stream=True)
 
         # Test error chunk
         error_chunk = {
@@ -70,9 +71,7 @@ class TestOpenRouterChatCompletionStreamingHandler:
         assert exc_info.value.status_code == 400
 
     def test_chunk_parser_key_error(self):
-        handler = OpenRouterChatCompletionStreamingHandler(
-            streaming_response=None, sync_stream=True
-        )
+        handler = OpenRouterChatCompletionStreamingHandler(streaming_response=None, sync_stream=True)
 
         # Test invalid chunk missing required fields
         invalid_chunk = {"incomplete": "data"}
@@ -96,9 +95,7 @@ def test_openrouter_extra_body_transformation():
 
     # https://github.com/BerriAI/litellm/issues/8425, validate its not contained in extra_body still
     assert transformed_request["provider"]["order"] == ["DeepSeek"]
-    assert transformed_request["messages"] == [
-        {"role": "user", "content": "Hello, world!"}
-    ]
+    assert transformed_request["messages"] == [{"role": "user", "content": "Hello, world!"}]
 
 
 def test_openrouter_cache_control_flag_removal():
@@ -359,9 +356,7 @@ def test_openrouter_transform_request_multiple_cache_controls():
 
     # Only the last block should have cache_control
     for i in range(4):
-        assert (
-            "cache_control" not in system_message["content"][i]
-        ), f"Block {i} should not have cache_control"
+        assert "cache_control" not in system_message["content"][i], f"Block {i} should not have cache_control"
 
     assert system_message["content"][4]["cache_control"] == {"type": "ephemeral"}
     assert "cache_control" not in system_message
@@ -427,9 +422,7 @@ def test_openrouter_cost_tracking_non_streaming():
         usage=Usage(prompt_tokens=10, completion_tokens=20, total_tokens=30),
     )
 
-    with patch.object(
-        OpenAIGPTConfig, "transform_response", return_value=model_response
-    ):
+    with patch.object(OpenAIGPTConfig, "transform_response", return_value=model_response):
         result = config.transform_response(
             model="openrouter/anthropic/claude-sonnet-4.5",
             raw_response=mock_response,
@@ -443,16 +436,8 @@ def test_openrouter_cost_tracking_non_streaming():
         )
 
     assert hasattr(result, "_hidden_params")
-    assert (
-        "llm_provider-x-litellm-response-cost"
-        in result._hidden_params["additional_headers"]
-    )
-    assert (
-        result._hidden_params["additional_headers"][
-            "llm_provider-x-litellm-response-cost"
-        ]
-        == 0.00015
-    )
+    assert "llm_provider-x-litellm-response-cost" in result._hidden_params["additional_headers"]
+    assert result._hidden_params["additional_headers"]["llm_provider-x-litellm-response-cost"] == 0.00015
 
 
 def test_openrouter_cost_tracking_streaming():
@@ -478,9 +463,7 @@ def test_openrouter_cost_tracking_streaming():
     assert transformed_request["usage"] == {"include": True}
 
     # Test streaming chunks preserve cost data
-    handler = OpenRouterChatCompletionStreamingHandler(
-        streaming_response=None, sync_stream=True
-    )
+    handler = OpenRouterChatCompletionStreamingHandler(streaming_response=None, sync_stream=True)
 
     # First chunk - content only
     chunk1 = {
@@ -534,9 +517,7 @@ def test_openrouter_reasoning_models_allow_reasoning_effort_param():
     """
     config = OpenrouterConfig()
 
-    supported_params = config.get_supported_openai_params(
-        model="openrouter/deepseek/deepseek-v3.2"
-    )
+    supported_params = config.get_supported_openai_params(model="openrouter/deepseek/deepseek-v3.2")
 
     assert "reasoning_effort" in supported_params
     assert supported_params.count("reasoning_effort") == 1
@@ -548,9 +529,7 @@ def test_openrouter_non_reasoning_models_do_not_add_reasoning_effort():
     """
     config = OpenrouterConfig()
 
-    supported_params = config.get_supported_openai_params(
-        model="openrouter/anthropic/claude-3-5-haiku"
-    )
+    supported_params = config.get_supported_openai_params(model="openrouter/anthropic/claude-3-5-haiku")
 
     assert "reasoning_effort" not in supported_params
 
@@ -618,3 +597,112 @@ def test_openrouter_reasoning_effort_high_passes_through():
     )
 
     assert result["reasoning_effort"] == "high"
+
+
+def _build_openrouter_stream_chunks(with_reasoning: bool) -> list:
+    reasoning_content = "thinking about the reply" if with_reasoning else None
+    deltas = [
+        Delta(role="assistant", content="Hello"),
+        Delta(content="", reasoning_content=reasoning_content),
+        Delta(content=""),
+    ]
+    finish_reasons = [None, None, "stop"]
+    return [
+        ModelResponseStream(
+            id="gen-1789318296-NI3w440VHvyohcmwVctG",
+            object="chat.completion.chunk",
+            created=1789318296,
+            model="z-ai/glm-5.3",
+            choices=[StreamingChoices(index=0, delta=delta, finish_reason=finish_reason)],
+        )
+        for delta, finish_reason in zip(deltas, finish_reasons)
+    ] + [
+        ModelResponseStream(
+            id="gen-1789318296-NI3w440VHvyohcmwVctG",
+            object="chat.completion.chunk",
+            created=1789318296,
+            model="z-ai/glm-5.3",
+            choices=[StreamingChoices(index=0, delta=Delta(content=""), finish_reason=None)],
+            usage=Usage(
+                prompt_tokens=13,
+                completion_tokens=215,
+                total_tokens=228,
+                cost=0.0009642,
+                completion_tokens_details={"reasoning_tokens": 255},
+                prompt_tokens_details={"cached_tokens": 0},
+                cost_details={
+                    "upstream_inference_cost": 0.0009642,
+                    "upstream_inference_prompt_cost": 0.0000182,
+                    "upstream_inference_completions_cost": 0.000946,
+                },
+            ),
+        )
+    ]
+
+
+def _assert_openrouter_streaming_cost(assembled_response: ModelResponse, logging_obj: Logging) -> None:
+    assert getattr(assembled_response.usage, "cost", None) == 0.0009642
+    assert getattr(assembled_response.usage, "cost_details", None) == {
+        "upstream_inference_cost": 0.0009642,
+        "upstream_inference_prompt_cost": 0.0000182,
+        "upstream_inference_completions_cost": 0.000946,
+    }
+    assert assembled_response._hidden_params["additional_headers"]["llm_provider-x-litellm-response-cost"] == 0.0009642
+    assert logging_obj._response_cost_calculator(result=assembled_response) == 0.0009642
+
+
+def _openrouter_streaming_logging_obj() -> Logging:
+    import time
+
+    logging_obj = Logging(
+        model="z-ai/glm-5.3",
+        messages=[{"role": "user", "content": "hi"}],
+        stream=True,
+        call_type="acompletion",
+        start_time=time.time(),
+        litellm_call_id="test-openrouter-streaming-cost",
+        function_id="test-openrouter-streaming-cost",
+    )
+    logging_obj.update_environment_variables(
+        litellm_params={"metadata": {}, "litellm_metadata": {}},
+        optional_params={},
+    )
+    logging_obj.model_call_details["custom_llm_provider"] = "openrouter"
+    return logging_obj
+
+
+@pytest.mark.parametrize("with_reasoning", [True, False])
+def test_openrouter_streaming_cost_reaches_assembled_response(with_reasoning):
+    """
+    OpenRouter reports usage.cost in the final streaming chunk. The chunk
+    builder rebuilds usage from token fields only, so without a provider hook
+    the reported cost is dropped and spend logs show 0.
+    """
+    logging_obj = _openrouter_streaming_logging_obj()
+
+    assembled_response = litellm.stream_chunk_builder(
+        chunks=_build_openrouter_stream_chunks(with_reasoning),
+        messages=[{"role": "user", "content": "hi"}],
+        logging_obj=logging_obj,
+    )
+
+    _assert_openrouter_streaming_cost(assembled_response, logging_obj)
+
+
+def test_openrouter_streaming_cost_missing_cost_chunk():
+    """
+    Streams without a provider-reported cost must not get a fake cost value.
+    """
+    logging_obj = _openrouter_streaming_logging_obj()
+
+    chunks = _build_openrouter_stream_chunks(with_reasoning=False)
+    chunks[-1].usage = Usage(prompt_tokens=13, completion_tokens=215, total_tokens=228)
+
+    assembled_response = litellm.stream_chunk_builder(
+        chunks=chunks,
+        messages=[{"role": "user", "content": "hi"}],
+        logging_obj=logging_obj,
+    )
+
+    assert getattr(assembled_response.usage, "cost", None) is None
+    assert "llm_provider-x-litellm-response-cost" not in assembled_response._hidden_params.get("additional_headers", {})

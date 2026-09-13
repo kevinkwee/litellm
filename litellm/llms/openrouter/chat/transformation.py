@@ -10,8 +10,8 @@ from enum import Enum
 from typing import Any, AsyncIterator, Iterator, List, Optional, Tuple, Union, cast
 
 import httpx
-import litellm
 
+import litellm
 from litellm.llms.base_llm.base_model_iterator import BaseModelResponseIterator
 from litellm.llms.base_llm.chat.transformation import BaseLLMException
 from litellm.types.llms.openai import AllMessageValues, ChatCompletionToolParam
@@ -232,6 +232,29 @@ class OpenrouterConfig(OpenAIGPTConfig):
             status_code=status_code,
             headers=headers,
         )
+
+    def apply_assembled_streaming_response_metadata(
+        self,
+        response: ModelResponse,
+        chunks: List[Any],
+    ) -> None:
+        usage_with_cost = None
+        for chunk in reversed(chunks):
+            chunk_usage = getattr(chunk, "usage", None)
+            if chunk_usage is not None and getattr(chunk_usage, "cost", None) is not None:
+                usage_with_cost = chunk_usage
+                break
+
+        if usage_with_cost is None:
+            return
+
+        cost = float(usage_with_cost.cost)
+        response._hidden_params.setdefault("additional_headers", {})["llm_provider-x-litellm-response-cost"] = cost
+        response.usage.cost = cost
+
+        cost_details = getattr(usage_with_cost, "cost_details", None)
+        if cost_details is not None:
+            response.usage.cost_details = cost_details
 
     def get_model_response_iterator(
         self,
