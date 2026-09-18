@@ -506,6 +506,7 @@ output_parse_pii: bool = False
 from litellm.litellm_core_utils.get_model_cost_map import get_model_cost_map
 
 model_cost = get_model_cost_map(url=model_cost_map_url)
+runtime_registered_model_cost_keys: set = set()
 cost_discount_config: Dict[str, float] = {}  # Provider-specific cost discounts {"vertex_ai": 0.05} = 5% discount
 cost_margin_config: Dict[
     str, Union[float, Dict[str, float]]

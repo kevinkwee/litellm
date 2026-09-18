@@ -112,9 +112,7 @@ def test_reload_model_cost_map_no_db_500(client, auth_as, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_schedule_model_cost_map_reload_happy(
-    client, auth_as, monkeypatch, mock_prisma
-):
+def test_schedule_model_cost_map_reload_happy(client, auth_as, monkeypatch, mock_prisma):
     """Admin schedules a reload — handler upserts config and echoes interval."""
     from litellm.proxy import proxy_server as ps
     from litellm.proxy._types import LitellmUserRoles
@@ -140,9 +138,7 @@ def test_schedule_model_cost_map_reload_happy(
     assert table.upsert.await_count == 1
 
 
-def test_schedule_model_cost_map_reload_invalid_hours(
-    client, auth_as, monkeypatch, mock_prisma
-):
+def test_schedule_model_cost_map_reload_invalid_hours(client, auth_as, monkeypatch, mock_prisma):
     """hours <= 0 is rejected with 400."""
     from litellm.proxy import proxy_server as ps
     from litellm.proxy._types import LitellmUserRoles
@@ -221,9 +217,7 @@ def test_cancel_model_cost_map_reload_no_db_500(client, auth_as, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_get_model_cost_map_reload_status_no_db_not_scheduled(
-    client, auth_as, monkeypatch
-):
+def test_get_model_cost_map_reload_status_no_db_not_scheduled(client, auth_as, monkeypatch):
     """No prisma client → returns the not-scheduled shape (4 keys, all-null)."""
     from litellm.proxy import proxy_server as ps
     from litellm.proxy._types import LitellmUserRoles
@@ -240,9 +234,7 @@ def test_get_model_cost_map_reload_status_no_db_not_scheduled(
     }
 
 
-def test_get_model_cost_map_reload_status_scheduled(
-    client, auth_as, monkeypatch, mock_prisma
-):
+def test_get_model_cost_map_reload_status_scheduled(client, auth_as, monkeypatch, mock_prisma):
     """A valid config row → scheduled=True and the interval is echoed."""
     from litellm.proxy import proxy_server as ps
     from litellm.proxy._types import LitellmUserRoles
@@ -265,9 +257,7 @@ def test_get_model_cost_map_reload_status_scheduled(
     }
 
 
-def test_get_model_cost_map_reload_status_no_config_not_scheduled(
-    client, auth_as, monkeypatch, mock_prisma
-):
+def test_get_model_cost_map_reload_status_no_config_not_scheduled(client, auth_as, monkeypatch, mock_prisma):
     """Config row exists but interval_hours=None → not scheduled."""
     from litellm.proxy import proxy_server as ps
     from litellm.proxy._types import LitellmUserRoles
@@ -332,9 +322,7 @@ def test_get_model_cost_map_source_happy(client, auth_as, monkeypatch):
     }
 
 
-def test_get_model_cost_map_source_admin_view_only_allowed(
-    client, auth_as, monkeypatch
-):
+def test_get_model_cost_map_source_admin_view_only_allowed(client, auth_as, monkeypatch):
     """PROXY_ADMIN_VIEW_ONLY can read source info — pins the read-only ACL."""
     from litellm.proxy._types import LitellmUserRoles
 
@@ -369,3 +357,45 @@ def test_get_model_cost_map_source_not_admin_forbidden(client, auth_as):
         response = client.get("/model/cost_map/source")
     assert response.status_code == 403
     assert "Admin role required" in response.json().get("detail", "")
+
+
+def test_reload_model_cost_map_preserves_runtime_registered_pricing(client, auth_as, monkeypatch, mock_prisma):
+    """POST /reload/model_cost_map must keep pricing registered at runtime by router deployments."""
+    import litellm
+
+    from litellm.proxy import proxy_server as ps
+    from litellm.proxy._types import LitellmUserRoles
+
+    _attach_litellm_config(mock_prisma)
+    monkeypatch.setattr(ps, "prisma_client", mock_prisma)
+    monkeypatch.setattr(litellm, "model_cost", {})
+    monkeypatch.setattr(litellm, "runtime_registered_model_cost_keys", set())
+
+    litellm.register_model(
+        model_cost={
+            "deployment-uuid-1": {
+                "litellm_provider": "ollama_chat",
+                "mode": "chat",
+                "input_cost_per_token": 0.0000014,
+            }
+        }
+    )
+
+    fake_cost_map = {"gpt-4": {"input_cost": 0.03}}
+    monkeypatch.setattr(
+        "litellm.litellm_core_utils.get_model_cost_map.get_model_cost_map",
+        lambda url=None: fake_cost_map,
+    )
+    monkeypatch.setattr("litellm.add_known_models", lambda model_cost_map=None: None)
+
+    async def _fake_invalidate(name):
+        return None
+
+    monkeypatch.setattr(ps, "invalidate_config_param", _fake_invalidate)
+
+    with auth_as(LitellmUserRoles.PROXY_ADMIN):
+        response = client.post("/reload/model_cost_map")
+
+    assert response.status_code == 200
+    assert "gpt-4" in litellm.model_cost
+    assert litellm.model_cost["deployment-uuid-1"]["input_cost_per_token"] == 0.0000014

@@ -25,9 +25,7 @@ from litellm.litellm_core_utils.get_model_cost_map import (
 
 
 def _make_models(n: int) -> dict:
-    return {
-        f"model-{i}": {"litellm_provider": "openai", "mode": "chat"} for i in range(n)
-    }
+    return {f"model-{i}": {"litellm_provider": "openai", "mode": "chat"} for i in range(n)}
 
 
 def test_count_model_entries_excludes_reserved_keys():
@@ -102,9 +100,7 @@ def test_finalize_pops_key_and_installs_rules():
         # The reserved key is removed from the returned model map ...
         assert FALLBACK_GENERALIZATIONS_KEY not in finalized
         # ... and its rules are installed into the generalizations module.
-        assert match_fallback_generalization("widget-9") == {
-            "litellm_provider": "openai"
-        }
+        assert match_fallback_generalization("widget-9") == {"litellm_provider": "openai"}
     finally:
         set_fallback_generalizations(previous)
 
@@ -112,9 +108,7 @@ def test_finalize_pops_key_and_installs_rules():
 def test_finalize_with_no_block_clears_rules():
     previous = list(get_fallback_generalization_rules())
     try:
-        set_fallback_generalizations(
-            [{"name": "stale", "pattern": r"^x", "model_info": {"a": 1}}]
-        )
+        set_fallback_generalizations([{"name": "stale", "pattern": r"^x", "model_info": {"a": 1}}])
         _finalize_model_cost_map(_make_models(2))
         assert match_fallback_generalization("x-1") is None
     finally:
@@ -155,9 +149,7 @@ def test_shipped_backup_marks_claude_4_6_plus_adaptive_not_4_0():
 
     rules = backup[FALLBACK_GENERALIZATIONS_KEY]["rules"]
     pricing_rule = next(r for r in rules if r.get("name") == "anthropic-claude")
-    adaptive_rule = next(
-        r for r in rules if r.get("name") == "anthropic-claude-adaptive-thinking"
-    )
+    adaptive_rule = next(r for r in rules if r.get("name") == "anthropic-claude-adaptive-thinking")
     assert "supports_adaptive_thinking" not in pricing_rule["model_info"]
     assert adaptive_rule["model_info"]["supports_adaptive_thinking"] is True
 
@@ -180,3 +172,34 @@ def test_shipped_backup_marks_claude_4_6_plus_adaptive_not_4_0():
         "claude-opus-4-5",
     ]:
         assert "supports_adaptive_thinking" not in backup[non_adaptive], non_adaptive
+
+
+def test_replace_model_cost_map_preserves_runtime_registered_entries(monkeypatch):
+    """Reloading the cost map must not drop pricing registered at runtime by router deployments."""
+    import litellm
+
+    from litellm.litellm_core_utils.get_model_cost_map import replace_model_cost_map
+
+    monkeypatch.setattr(litellm, "model_cost", {})
+    monkeypatch.setattr(litellm, "runtime_registered_model_cost_keys", set())
+
+    litellm.register_model(
+        model_cost={
+            "runtime-deployment-id": {
+                "litellm_provider": "ollama_chat",
+                "mode": "chat",
+                "input_cost_per_token": 0.0000014,
+                "output_cost_per_token": 0.0000044,
+            }
+        }
+    )
+    assert "runtime-deployment-id" in litellm.runtime_registered_model_cost_keys
+
+    merged = replace_model_cost_map(new_model_cost_map={"claude-3-5": {"input_cost_per_token": 0.000003}})
+
+    assert merged["runtime-deployment-id"]["input_cost_per_token"] == 0.0000014
+    assert merged["claude-3-5"]["input_cost_per_token"] == 0.000003
+    assert litellm.model_cost["runtime-deployment-id"]["input_cost_per_token"] == 0.0000014
+
+    model_info = litellm.get_model_info(model="runtime-deployment-id", custom_llm_provider="ollama_chat")
+    assert model_info["input_cost_per_token"] == 0.0000014

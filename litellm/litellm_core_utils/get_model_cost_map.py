@@ -312,3 +312,18 @@ def get_model_cost_map(url: str) -> dict:
     _cost_map_source_info.source = "remote"
     _cost_map_source_info.fallback_reason = None
     return _finalize_model_cost_map(content)
+
+
+def replace_model_cost_map(new_model_cost_map: dict) -> dict:
+    """Swap in a new cost map, keeping entries registered at runtime via register_model."""
+    import litellm
+    from litellm.utils import _invalidate_model_cost_lowercase_map
+
+    runtime_entries = {
+        key: litellm.model_cost[key]
+        for key in tuple(litellm.runtime_registered_model_cost_keys)
+        if key in litellm.model_cost
+    }
+    litellm.model_cost = {**new_model_cost_map, **runtime_entries}
+    _invalidate_model_cost_lowercase_map()
+    return litellm.model_cost
