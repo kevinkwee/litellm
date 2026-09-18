@@ -1,6 +1,7 @@
 import inspect
 import os
 import sys
+import time
 from typing import Any, Dict, Optional, Union, cast
 
 import pytest
@@ -8,13 +9,15 @@ from pydantic import BaseModel
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../..")))
 
+from litellm.litellm_core_utils.litellm_logging import Logging
+from litellm.litellm_core_utils.streaming_handler import CustomStreamWrapper
 from litellm.llms.ollama.chat.transformation import (
     OllamaChatConfig,
     OllamaChatCompletionResponseIterator,
 )
 
 from litellm.types.llms.openai import AllMessageValues
-from litellm.utils import get_optional_params
+from litellm.utils import ModelResponseListIterator, get_optional_params
 
 import json
 from unittest.mock import MagicMock
@@ -2257,3 +2260,152 @@ class TestOllamaStreamingParallelToolCalls:
         delta = parsed.choices[0].delta
         assert delta.tool_calls is not None
         assert len(delta.tool_calls) == 0
+
+
+class TestOllamaPromptEvalCachedCount:
+    """Ollama's prompt_eval_cached_count is the cache-hit subset of the full
+    prompt_eval_count. It must surface as usage.prompt_tokens_details.cached_tokens
+    while prompt_tokens keeps reporting the full prompt_eval_count total."""
+
+    def _call_transform_response(self, ollama_response: dict):
+        config = OllamaChatConfig()
+        mock_response = MagicMock()
+        mock_response.json.return_value = ollama_response
+        mock_response.text = json.dumps(ollama_response)
+        model_response = ModelResponse()
+        model_response.choices = [Choices(message=Message(content=""), index=0)]
+        return config.transform_response(
+            model="qwen3:14b",
+            raw_response=mock_response,
+            model_response=model_response,
+            logging_obj=MagicMock(),
+            request_data={},
+            messages=[{"role": "user", "content": "Hello"}],
+            optional_params={},
+            litellm_params={},
+            encoding=None,
+            api_key=None,
+            json_mode=False,
+        )
+
+    def test_transform_response_maps_prompt_eval_cached_count(self):
+        result = self._call_transform_response(
+            {
+                "model": "qwen3:14b",
+                "created_at": "2025-01-11T00:00:00.000000Z",
+                "message": {"role": "assistant", "content": "Hello!"},
+                "done": True,
+                "prompt_eval_count": 100,
+                "prompt_eval_cached_count": 40,
+                "eval_count": 50,
+            }
+        )
+
+        assert result.usage.prompt_tokens == 100
+        assert result.usage.prompt_tokens_details is not None
+        assert result.usage.prompt_tokens_details.cached_tokens == 40
+        assert result.usage.total_tokens == 150
+
+    def test_transform_response_without_prompt_eval_cached_count(self):
+        result = self._call_transform_response(
+            {
+                "model": "qwen3:14b",
+                "created_at": "2025-01-11T00:00:00.000000Z",
+                "message": {"role": "assistant", "content": "Hello!"},
+                "done": True,
+                "prompt_eval_count": 100,
+                "eval_count": 50,
+            }
+        )
+
+        assert result.usage.prompt_tokens == 100
+        assert result.usage.prompt_tokens_details is None
+
+    def test_chunk_parser_maps_prompt_eval_cached_count(self):
+        iterator = OllamaChatCompletionResponseIterator(
+            streaming_response=iter([]),
+            sync_stream=True,
+        )
+
+        done_chunk = {
+            "model": "qwen3:14b",
+            "message": {"role": "assistant", "content": "Hello!"},
+            "done": True,
+            "prompt_eval_count": 100,
+            "prompt_eval_cached_count": 40,
+            "eval_count": 50,
+        }
+
+        result = iterator.chunk_parser(done_chunk)
+
+        assert result.usage.prompt_tokens == 100
+        assert result.usage.prompt_tokens_details is not None
+        assert result.usage.prompt_tokens_details.cached_tokens == 40
+
+    def test_chunk_parser_without_prompt_eval_cached_count(self):
+        iterator = OllamaChatCompletionResponseIterator(
+            streaming_response=iter([]),
+            sync_stream=True,
+        )
+
+        chunk = {
+            "model": "qwen3:14b",
+            "message": {"role": "assistant", "content": "He"},
+            "done": False,
+        }
+
+        result = iterator.chunk_parser(chunk)
+
+        assert result.usage.prompt_tokens == 0
+        assert result.usage.prompt_tokens_details is None
+
+    def test_streaming_final_usage_keeps_cached_tokens(self):
+        iterator = OllamaChatCompletionResponseIterator(
+            streaming_response=iter([]),
+            sync_stream=True,
+        )
+        content_chunk = iterator.chunk_parser(
+            {
+                "model": "qwen3:14b",
+                "message": {"role": "assistant", "content": "Hello!"},
+                "done": False,
+            }
+        )
+        done_chunk = iterator.chunk_parser(
+            {
+                "model": "qwen3:14b",
+                "message": {"role": "assistant", "content": ""},
+                "done": True,
+                "prompt_eval_count": 100,
+                "prompt_eval_cached_count": 40,
+                "eval_count": 50,
+            }
+        )
+
+        completion_stream = ModelResponseListIterator(model_responses=[content_chunk, done_chunk])
+        response = CustomStreamWrapper(
+            completion_stream=completion_stream,
+            model="ollama_chat/qwen3:14b",
+            custom_llm_provider="ollama_chat",
+            logging_obj=Logging(
+                model="ollama_chat/qwen3:14b",
+                messages=[{"role": "user", "content": "Hey"}],
+                stream=True,
+                call_type="completion",
+                start_time=time.time(),
+                litellm_call_id="12345",
+                function_id="1245",
+            ),
+            stream_options={"include_usage": True},
+        )
+
+        final_usage = None
+        for chunk in response:
+            if getattr(chunk, "usage", None) is not None:
+                final_usage = chunk.usage
+
+        assert final_usage is not None
+        assert final_usage.prompt_tokens == 100
+        assert final_usage.completion_tokens == 50
+        assert final_usage.prompt_tokens_details is not None
+        assert final_usage.prompt_tokens_details.cached_tokens == 40

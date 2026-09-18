@@ -1,6 +1,5 @@
 import json
 import time
-from litellm._uuid import uuid
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -16,6 +15,7 @@ from httpx._models import Headers, Response
 from pydantic import BaseModel
 
 import litellm
+from litellm._uuid import uuid
 from litellm.litellm_core_utils.core_helpers import map_finish_reason
 from litellm.litellm_core_utils.prompt_templates.common_utils import (
     _extract_reasoning_content,
@@ -585,6 +585,7 @@ class OllamaChatConfig(BaseConfig):
             "eval_count",
             litellm.token_counter(text=response_json["message"]["content"]),
         )
+        prompt_eval_cached_count = response_json.get("prompt_eval_cached_count")
         setattr(
             model_response,
             "usage",
@@ -592,6 +593,9 @@ class OllamaChatConfig(BaseConfig):
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
                 total_tokens=prompt_tokens + completion_tokens,
+                prompt_tokens_details=(
+                    {"cached_tokens": prompt_eval_cached_count} if prompt_eval_cached_count is not None else None
+                ),
             ),
         )
         attach_durations_to_response(model_response, extract_ollama_durations(response_json))
@@ -764,10 +768,14 @@ class OllamaChatCompletionResponseIterator(BaseModelResponseIterator):
                     )
                 ]
 
+            prompt_eval_cached_count = chunk.get("prompt_eval_cached_count")
             usage = ChatCompletionUsageBlock(
                 prompt_tokens=chunk.get("prompt_eval_count", 0),
                 completion_tokens=chunk.get("eval_count", 0),
                 total_tokens=chunk.get("prompt_eval_count", 0) + chunk.get("eval_count", 0),
+                prompt_tokens_details={"cached_tokens": prompt_eval_cached_count}
+                if prompt_eval_cached_count is not None
+                else None,
             )
 
             model_response_stream = ModelResponseStream(
