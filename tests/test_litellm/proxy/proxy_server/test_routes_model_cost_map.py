@@ -399,3 +399,58 @@ def test_reload_model_cost_map_preserves_runtime_registered_pricing(client, auth
     assert response.status_code == 200
     assert "gpt-4" in litellm.model_cost
     assert litellm.model_cost["deployment-uuid-1"]["input_cost_per_token"] == 0.0000014
+
+
+def test_reload_model_cost_map_keeps_runtime_keys_out_of_dispatch_sets(client, auth_as, monkeypatch, mock_prisma):
+    """POST /reload/model_cost_map must not add runtime-registered models to
+    ``open_ai_chat_completion_models``: ``main.completion`` checks that set before
+    the ollama_chat branch, so membership reroutes an ollama-native payload (with
+    the ``options`` key) into the OpenAI SDK handler and every request fails with
+    ``AsyncCompletions.create() got an unexpected keyword argument 'options'``."""
+    import litellm
+
+    from litellm.proxy import proxy_server as ps
+    from litellm.proxy._types import LitellmUserRoles
+
+    raw_name = "glm-5.3:cloud"
+    alias = f"ollama_chat/{raw_name}"
+
+    _attach_litellm_config(mock_prisma)
+    monkeypatch.setattr(ps, "prisma_client", mock_prisma)
+    monkeypatch.setattr(litellm, "model_cost", {})
+    monkeypatch.setattr(litellm, "runtime_registered_model_cost_keys", set())
+    monkeypatch.setattr(litellm, "open_ai_chat_completion_models", set())
+
+    litellm.register_model(
+        model_cost={
+            "deployment-uuid-glm": {
+                "key": raw_name,
+                "litellm_provider": "openai",
+                "mode": "chat",
+                "input_cost_per_token": 0.0000014,
+            },
+            alias: {"litellm_provider": "openai", "mode": "chat"},
+        }
+    )
+
+    fake_cost_map = {
+        "gpt-4": {"litellm_provider": "openai", "mode": "chat", "input_cost_per_token": 0.00003},
+    }
+    monkeypatch.setattr(
+        "litellm.litellm_core_utils.get_model_cost_map.get_model_cost_map",
+        lambda url=None: fake_cost_map,
+    )
+
+    async def _fake_invalidate(name):
+        return None
+
+    monkeypatch.setattr(ps, "invalidate_config_param", _fake_invalidate)
+
+    with auth_as(LitellmUserRoles.PROXY_ADMIN):
+        response = client.post("/reload/model_cost_map")
+
+    assert response.status_code == 200
+    assert raw_name not in litellm.open_ai_chat_completion_models
+    assert "gpt-4" in litellm.open_ai_chat_completion_models
+    assert litellm.model_cost[raw_name]["litellm_provider"] == "openai"
+    assert litellm.model_cost["deployment-uuid-glm"]["input_cost_per_token"] == 0.0000014

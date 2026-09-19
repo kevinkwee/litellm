@@ -203,3 +203,70 @@ def test_replace_model_cost_map_preserves_runtime_registered_entries(monkeypatch
 
     model_info = litellm.get_model_info(model="runtime-deployment-id", custom_llm_provider="ollama_chat")
     assert model_info["input_cost_per_token"] == 0.0000014
+
+
+def test_reload_keeps_runtime_registered_keys_out_of_provider_dispatch_sets(monkeypatch):
+    """A deployment with stale openai provider metadata must not poison dispatch.
+
+    Router deployments register pricing under an ``ollama_chat/<model>`` alias.
+    ``get_model_info`` resolves that alias and relocates the entry under the raw
+    backend name, where a stale ``litellm_provider: "openai"`` tag wins the merge.
+    Feeding the merged map to ``add_known_models`` must NOT add the raw name to
+    ``open_ai_chat_completion_models``. ``main.completion`` checks that set before
+    the ollama_chat branch, so membership would route an ollama-native payload
+    (with the ``options`` key) into the OpenAI SDK handler and crash with
+    ``AsyncCompletions.create() got an unexpected keyword argument 'options'``.
+    """
+    import litellm
+
+    from litellm.litellm_core_utils.get_model_cost_map import replace_model_cost_map
+
+    raw_name = "glm-5.3:cloud"
+    alias = f"ollama_chat/{raw_name}"
+    poisoned_sets = (
+        litellm.open_ai_chat_completion_models,
+        litellm.open_ai_text_completion_models,
+        litellm.cohere_models,
+        litellm.anthropic_models,
+        litellm.openrouter_models,
+        litellm.vercel_ai_gateway_models,
+        litellm.vertex_text_models,
+        litellm.vertex_code_text_models,
+        litellm.vertex_chat_models,
+    )
+    for provider_set in poisoned_sets:
+        provider_set.discard(raw_name)
+        provider_set.discard(alias)
+    monkeypatch.setattr(litellm, "model_cost", {})
+    monkeypatch.setattr(litellm, "runtime_registered_model_cost_keys", set())
+    monkeypatch.setattr(litellm, "open_ai_chat_completion_models", set())
+    monkeypatch.setattr(litellm, "anthropic_models", set())
+
+    litellm.register_model(
+        model_cost={
+            "deployment-uuid-glm": {
+                "key": raw_name,
+                "litellm_provider": "openai",
+                "mode": "chat",
+                "input_cost_per_token": 0.0000014,
+                "output_cost_per_token": 0.0000044,
+            },
+            alias: {"litellm_provider": "openai", "mode": "chat"},
+        }
+    )
+    assert raw_name in litellm.model_cost
+    assert litellm.model_cost[raw_name]["litellm_provider"] == "openai"
+    assert raw_name in litellm.runtime_registered_model_cost_keys
+
+    merged = replace_model_cost_map(
+        new_model_cost_map={"claude-3-5-20241022": {"litellm_provider": "anthropic", "mode": "chat"}}
+    )
+    litellm.add_known_models(model_cost_map=merged)
+
+    assert raw_name not in litellm.open_ai_chat_completion_models, (
+        "raw backend name must not land in the OpenAI dispatch set; membership "
+        "reroutes ollama_chat requests into the OpenAI SDK handler"
+    )
+    assert "claude-3-5-20241022" in litellm.anthropic_models, (
+        "official-map entries must still populate provider dispatch sets after a reload"
+    )

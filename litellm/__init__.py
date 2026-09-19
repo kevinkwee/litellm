@@ -694,6 +694,8 @@ def is_openai_finetune_model(key: str) -> bool:
 def add_known_models(model_cost_map: Optional[Dict] = None):
     _map = model_cost_map if model_cost_map is not None else model_cost
     for key, value in _map.items():
+        if key in runtime_registered_model_cost_keys:
+            continue
         if value.get("litellm_provider") == "openai" and not is_openai_finetune_model(key):
             open_ai_chat_completion_models.add(key)
         elif value.get("litellm_provider") == "text-completion-openai":
