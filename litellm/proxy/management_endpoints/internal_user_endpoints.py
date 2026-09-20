@@ -29,6 +29,7 @@ from litellm.proxy.auth.auth_checks import get_team_object, get_user_object
 from litellm.proxy.auth.user_api_key_auth import user_api_key_auth
 from litellm.proxy.hooks.user_management_event_hooks import UserManagementEventHooks
 from litellm.proxy.management_endpoints.common_daily_activity import (
+    MAX_API_KEY_BREAKDOWN_LIMIT,
     get_daily_activity,
     get_daily_activity_aggregated,
 )
@@ -59,14 +60,14 @@ from litellm.repositories.verification_token_repository import (
 from litellm.types.proxy.management_endpoints.common_daily_activity import (
     SpendAnalyticsPaginatedResponse,
 )
-from litellm.types.proxy.management_endpoints.scim_v2 import (
-    SCIM_ENTERPRISE_METADATA_KEY,
-)
 from litellm.types.proxy.management_endpoints.internal_user_endpoints import (
     BulkUpdateUserRequest,
     BulkUpdateUserResponse,
     UserListResponse,
     UserUpdateResult,
+)
+from litellm.types.proxy.management_endpoints.scim_v2 import (
+    SCIM_ENTERPRISE_METADATA_KEY,
 )
 
 if TYPE_CHECKING:
@@ -2577,6 +2578,14 @@ async def get_user_daily_activity_aggregated(
         default=None,
         description="Filter by specific user ID. Admins can filter by any user or omit for global view. Non-admins must provide their own user_id.",
     ),
+    api_key_limit: Optional[int] = fastapi.Query(
+        default=None,
+        ge=1,
+        le=MAX_API_KEY_BREAKDOWN_LIMIT,
+        description="Cap the per-key breakdowns to the top N api keys by spend over the date range. "
+        "Keys outside the top N still count toward all totals; only per-key breakdown rows omit them. "
+        "Defaults to 100.",
+    ),
     timezone: Optional[int] = fastapi.Query(
         default=None,
         description="Timezone offset in minutes from UTC (e.g., 480 for PST). "
@@ -2629,6 +2638,7 @@ async def get_user_daily_activity_aggregated(
             model=model,
             api_key=api_key,
             timezone_offset_minutes=timezone,
+            api_key_limit=api_key_limit,
         )
 
     except HTTPException:
