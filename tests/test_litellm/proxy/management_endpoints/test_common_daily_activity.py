@@ -19,11 +19,13 @@ from litellm.proxy.management_endpoints.common_daily_activity import (
     _GROUP_GRAND_TOTAL,
     _adjust_dates_for_timezone,
     _build_aggregated_sql_query,
+    _build_api_key_breakdown_sql_query,
     _is_user_agent_tag,
     _record_to_spend_metrics,
     get_api_key_metadata,
     get_daily_activity,
     get_daily_activity_aggregated,
+    get_daily_activity_api_keys,
     update_metrics,
 )
 from litellm.types.proxy.management_endpoints.common_daily_activity import SpendMetrics
@@ -140,31 +142,30 @@ async def test_get_daily_activity_aggregated_with_endpoint_breakdown():
     mock_prisma = MagicMock()
     mock_prisma.db = MagicMock()
 
-    # The endpoint runs two statements: the rollup query (no per-key sets)
-    # and the top-key breakdown query. Rollup rows carry no api_key; every
-    # per-key row comes from the second statement.
+    # The aggregated endpoint runs one rollup statement over the small
+    # dimensions only. Rollup rows carry no api_key; per-key detail comes
+    # from get_daily_activity_api_keys.
     # GROUPING_ID values for relevant levels (date, api_key, model,
     # model_group, custom_llm_provider, mcp, endpoint):
     #   () grand total                  = 127
     #   (date)                          =  63
     #   (date, endpoint)                =  62
-    #   (date, endpoint, api_key)       =  30
     base = {
         "model": None,
         "model_group": None,
         "custom_llm_provider": None,
         "mcp_namespaced_tool_name": None,
+        "api_key": None,
         "cache_read_input_tokens": 0,
         "cache_creation_input_tokens": 0,
         "failed_requests": 0,
     }
     rollup_rows = [
-        # (date, endpoint) — rolls up across api_keys and models
+        # (date, endpoint) rolls up across api_keys and models
         {
             **base,
             "date": "2024-01-01",
             "endpoint": "/v1/chat/completions",
-            "api_key": None,
             "group_level": 62,
             "spend": 15.0,
             "prompt_tokens": 150,
@@ -176,7 +177,6 @@ async def test_get_daily_activity_aggregated_with_endpoint_breakdown():
             **base,
             "date": "2024-01-01",
             "endpoint": "/v1/embeddings",
-            "api_key": None,
             "group_level": 62,
             "spend": 3.0,
             "prompt_tokens": 30,
@@ -184,12 +184,11 @@ async def test_get_daily_activity_aggregated_with_endpoint_breakdown():
             "api_requests": 1,
             "successful_requests": 1,
         },
-        # (date) — per-date totals
+        # (date) per-date totals
         {
             **base,
             "date": "2024-01-01",
             "endpoint": None,
-            "api_key": None,
             "group_level": 63,
             "spend": 18.0,
             "prompt_tokens": 180,
@@ -197,12 +196,11 @@ async def test_get_daily_activity_aggregated_with_endpoint_breakdown():
             "api_requests": 3,
             "successful_requests": 3,
         },
-        # () — grand total
+        # () grand total
         {
             **base,
             "date": None,
             "endpoint": None,
-            "api_key": None,
             "group_level": 127,
             "spend": 18.0,
             "prompt_tokens": 180,
@@ -211,35 +209,8 @@ async def test_get_daily_activity_aggregated_with_endpoint_breakdown():
             "successful_requests": 3,
         },
     ]
-    key_breakdown_rows = [
-        # (date, endpoint, api_key) rows populate the per-key sub-buckets
-        {
-            **base,
-            "date": "2024-01-01",
-            "endpoint": "/v1/chat/completions",
-            "api_key": "key-1",
-            "group_level": 30,
-            "spend": 15.0,
-            "prompt_tokens": 150,
-            "completion_tokens": 75,
-            "api_requests": 2,
-            "successful_requests": 2,
-        },
-        {
-            **base,
-            "date": "2024-01-01",
-            "endpoint": "/v1/embeddings",
-            "api_key": "key-2",
-            "group_level": 30,
-            "spend": 3.0,
-            "prompt_tokens": 30,
-            "completion_tokens": 0,
-            "api_requests": 1,
-            "successful_requests": 1,
-        },
-    ]
 
-    mock_prisma.db.query_raw = AsyncMock(side_effect=[rollup_rows, key_breakdown_rows])
+    mock_prisma.db.query_raw = AsyncMock(return_value=rollup_rows)
     mock_prisma.db.litellm_verificationtoken = MagicMock()
     mock_prisma.db.litellm_verificationtoken.find_many = AsyncMock(return_value=[])
 
@@ -268,9 +239,9 @@ async def test_get_daily_activity_aggregated_with_endpoint_breakdown():
     # Verify /v1/chat/completions endpoint breakdown
     assert "/v1/chat/completions" in daily_data.breakdown.endpoints
     chat_endpoint = daily_data.breakdown.endpoints["/v1/chat/completions"]
-    assert chat_endpoint.metrics.spend == 15.0  # 10.0 + 5.0
-    assert chat_endpoint.metrics.prompt_tokens == 150  # 100 + 50
-    assert chat_endpoint.metrics.completion_tokens == 75  # 50 + 25
+    assert chat_endpoint.metrics.spend == 15.0
+    assert chat_endpoint.metrics.prompt_tokens == 150
+    assert chat_endpoint.metrics.completion_tokens == 75
 
     # Verify /v1/embeddings endpoint breakdown
     assert "/v1/embeddings" in daily_data.breakdown.endpoints
@@ -279,109 +250,81 @@ async def test_get_daily_activity_aggregated_with_endpoint_breakdown():
     assert embeddings_endpoint.metrics.prompt_tokens == 30
     assert embeddings_endpoint.metrics.completion_tokens == 0
 
-    # Verify API key breakdowns within endpoints
-    assert "key-1" in chat_endpoint.api_key_breakdown
-    assert chat_endpoint.api_key_breakdown["key-1"].metrics.spend == 15.0
-    assert "key-2" in embeddings_endpoint.api_key_breakdown
-    assert embeddings_endpoint.api_key_breakdown["key-2"].metrics.spend == 3.0
-
-    # Verify both statements ran through query_raw (not find_many)
-    assert mock_prisma.db.query_raw.call_count == 2
+    # One rollup statement, no per-key statement
+    assert mock_prisma.db.query_raw.call_count == 1
 
 
 @pytest.mark.asyncio
-async def test_get_daily_activity_aggregated_caps_api_key_breakdowns():
-    """Regression test for the Usage endpoint aggregation explosion.
+async def test_get_daily_activity_aggregated_returns_no_per_key_breakdowns():
+    """Per-key rows must never come back from the aggregated endpoint.
 
-    Eager per-key rollups over every api key shipped ~986k rows for one week
-    of data (90k distinct keys) and took the page down with Prisma timeouts
-    and 500s. Keys outside the top api_key_limit must have no per-key
-    breakdown rows, while every total and per-dimension metric still
-    includes their spend. The key metadata lookup must only see the capped
-    keys, not the whole key population.
+    Eager per-key rollups over the unbounded key dimension produced ~986k
+    rows for one week of data and took the Usage page down with Prisma
+    timeouts and 500s, so per-key detail moved to
+    get_daily_activity_api_keys. The aggregated response keeps every total
+    and small-dimension breakdown exact, its per-key maps stay empty, and
+    no key metadata lookup runs.
     """
     mock_prisma = MagicMock()
     mock_prisma.db = MagicMock()
 
-    base = {
-        "model_group": None,
-        "custom_llm_provider": None,
-        "mcp_namespaced_tool_name": None,
-        "endpoint": None,
-        "cache_read_input_tokens": 0,
-        "cache_creation_input_tokens": 0,
-        "failed_requests": 0,
-    }
     rollup_rows = [
-        # (date, model): 10.0 from the top key + 8.0 from a capped key
         {
-            **base,
             "date": "2026-09-13",
-            "model": "gpt-4",
             "api_key": None,
+            "model": "gpt-4",
+            "model_group": None,
+            "custom_llm_provider": None,
+            "mcp_namespaced_tool_name": None,
+            "endpoint": None,
             "group_level": 47,
             "spend": 18.0,
             "prompt_tokens": 180,
             "completion_tokens": 90,
+            "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 0,
             "api_requests": 9,
             "successful_requests": 9,
+            "failed_requests": 0,
         },
-        # (date) per-date totals
         {
-            **base,
             "date": "2026-09-13",
-            "model": None,
             "api_key": None,
+            "model": None,
+            "model_group": None,
+            "custom_llm_provider": None,
+            "mcp_namespaced_tool_name": None,
+            "endpoint": None,
             "group_level": 63,
             "spend": 18.0,
             "prompt_tokens": 180,
             "completion_tokens": 90,
+            "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 0,
             "api_requests": 9,
             "successful_requests": 9,
+            "failed_requests": 0,
         },
-        # () grand total
         {
-            **base,
             "date": None,
-            "model": None,
             "api_key": None,
+            "model": None,
+            "model_group": None,
+            "custom_llm_provider": None,
+            "mcp_namespaced_tool_name": None,
+            "endpoint": None,
             "group_level": 127,
             "spend": 18.0,
             "prompt_tokens": 180,
             "completion_tokens": 90,
+            "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 0,
             "api_requests": 9,
             "successful_requests": 9,
+            "failed_requests": 0,
         },
     ]
-    # Only the top key has per-key rows; the capped key is absent by design
-    key_breakdown_rows = [
-        {
-            **base,
-            "date": "2026-09-13",
-            "model": "gpt-4",
-            "api_key": "key-top",
-            "group_level": 15,
-            "spend": 10.0,
-            "prompt_tokens": 100,
-            "completion_tokens": 50,
-            "api_requests": 5,
-            "successful_requests": 5,
-        },
-        {
-            **base,
-            "date": "2026-09-13",
-            "model": None,
-            "api_key": "key-top",
-            "group_level": 31,
-            "spend": 10.0,
-            "prompt_tokens": 100,
-            "completion_tokens": 50,
-            "api_requests": 5,
-            "successful_requests": 5,
-        },
-    ]
-
-    mock_prisma.db.query_raw = AsyncMock(side_effect=[rollup_rows, key_breakdown_rows])
+    mock_prisma.db.query_raw = AsyncMock(return_value=rollup_rows)
     mock_prisma.db.litellm_verificationtoken = MagicMock()
     mock_prisma.db.litellm_verificationtoken.find_many = AsyncMock(return_value=[])
 
@@ -397,19 +340,145 @@ async def test_get_daily_activity_aggregated_caps_api_key_breakdowns():
         api_key=None,
     )
 
-    # Totals include the capped key's spend
-    assert result.metadata.total_spend == 18.0
     daily = result.results[0]
     assert daily.metrics.spend == 18.0
     assert daily.breakdown.models["gpt-4"].metrics.spend == 18.0
+    assert daily.breakdown.api_keys == {}
+    assert daily.breakdown.models["gpt-4"].api_key_breakdown == {}
+    mock_prisma.db.litellm_verificationtoken.find_many.assert_not_called()
 
-    # Per-key breakdowns contain only the top key
+
+@pytest.mark.asyncio
+async def test_get_daily_activity_api_keys_serves_per_key_breakdowns():
+    """The per-key endpoint is the only source of per-key rollups.
+
+    It returns them for the keys the page renders, plus pagination totals
+    over the whole key population in range, so a client can page deeper
+    without the server ever aggregating the full population eagerly.
+    """
+    mock_prisma = MagicMock()
+    mock_prisma.db = MagicMock()
+
+    count_rows = [
+        {
+            "key_count": 90_529,
+            "total_spend": 18.0,
+            "total_prompt_tokens": 180,
+            "total_completion_tokens": 90,
+            "total_cache_read_input_tokens": 0,
+            "total_cache_creation_input_tokens": 0,
+            "total_api_requests": 9,
+            "total_successful_requests": 9,
+            "total_failed_requests": 0,
+        }
+    ]
+    key_rows = [
+        # (date, api_key) range rollup for the key
+        {
+            "date": "2026-09-13",
+            "api_key": "key-top",
+            "model": None,
+            "model_group": None,
+            "custom_llm_provider": None,
+            "mcp_namespaced_tool_name": None,
+            "endpoint": None,
+            "group_level": 31,
+            "spend": 10.0,
+            "prompt_tokens": 100,
+            "completion_tokens": 50,
+            "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 0,
+            "api_requests": 5,
+            "successful_requests": 5,
+            "failed_requests": 0,
+        },
+        # (date, model, api_key) slice rollup for the key
+        {
+            "date": "2026-09-13",
+            "api_key": "key-top",
+            "model": "gpt-4",
+            "model_group": None,
+            "custom_llm_provider": None,
+            "mcp_namespaced_tool_name": None,
+            "endpoint": None,
+            "group_level": 15,
+            "spend": 10.0,
+            "prompt_tokens": 100,
+            "completion_tokens": 50,
+            "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 0,
+            "api_requests": 5,
+            "successful_requests": 5,
+            "failed_requests": 0,
+        },
+    ]
+    mock_prisma.db.query_raw = AsyncMock(side_effect=[count_rows, key_rows])
+    mock_prisma.db.litellm_verificationtoken = MagicMock()
+    mock_prisma.db.litellm_verificationtoken.find_many = AsyncMock(return_value=[])
+
+    result = await get_daily_activity_api_keys(
+        prisma_client=mock_prisma,
+        table_name="litellm_dailyuserspend",
+        entity_id_field="user_id",
+        entity_id=None,
+        start_date="2026-09-13",
+        end_date="2026-09-13",
+    )
+
+    daily = result.results[0]
     assert set(daily.breakdown.api_keys) == {"key-top"}
     assert set(daily.breakdown.models["gpt-4"].api_key_breakdown) == {"key-top"}
+    assert daily.breakdown.api_keys["key-top"].metrics.spend == 10.0
 
-    # The key metadata lookup saw only the capped-in keys
+    # Pagination totals come from the count statement, not the returned page
+    assert result.metadata.page == 1
+    assert result.metadata.total_pages == -(-90_529 // 50)
+    assert result.metadata.has_more is True
+    assert result.metadata.total_spend == 18.0
+    assert result.metadata.total_tokens == 270
+
+    # The key metadata lookup saw only the returned keys
     where = mock_prisma.db.litellm_verificationtoken.find_many.call_args[1]["where"]
     assert where["token"]["in"] == ["key-top"]
+
+
+@pytest.mark.asyncio
+async def test_get_daily_activity_api_keys_empty_range():
+    """An empty range must yield empty results and zeroed metadata, not a crash."""
+    mock_prisma = MagicMock()
+    mock_prisma.db = MagicMock()
+    count_rows = [
+        {
+            "key_count": 0,
+            "total_spend": None,
+            "total_prompt_tokens": None,
+            "total_completion_tokens": None,
+            "total_cache_read_input_tokens": None,
+            "total_cache_creation_input_tokens": None,
+            "total_api_requests": None,
+            "total_successful_requests": None,
+            "total_failed_requests": None,
+        }
+    ]
+    mock_prisma.db.query_raw = AsyncMock(side_effect=[count_rows, []])
+    mock_prisma.db.litellm_verificationtoken = MagicMock()
+    mock_prisma.db.litellm_verificationtoken.find_many = AsyncMock(return_value=[])
+
+    result = await get_daily_activity_api_keys(
+        prisma_client=mock_prisma,
+        table_name="litellm_dailyuserspend",
+        entity_id_field="user_id",
+        entity_id=None,
+        start_date="2026-09-13",
+        end_date="2026-09-13",
+    )
+
+    assert result.results == []
+    assert result.metadata.total_spend == 0.0
+    assert result.metadata.total_tokens == 0
+    assert result.metadata.total_pages == 0
+    assert result.metadata.has_more is False
+    mock_prisma.db.litellm_verificationtoken.find_many.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -687,21 +756,20 @@ async def test_aggregated_activity_preserves_metadata_for_deleted_keys():
         "cache_creation_input_tokens": 0,
         "failed_requests": 0,
     }
-    rollup_rows = [
+    count_rows = [
         {
-            **base,
-            "date": "2024-01-01",
-            "endpoint": "/v1/chat/completions",
-            "api_key": None,
-            "group_level": 62,
-            "spend": 10.0,
-            "prompt_tokens": 100,
-            "completion_tokens": 50,
-            "api_requests": 1,
-            "successful_requests": 1,
-        },
+            "key_count": 1,
+            "total_spend": 10.0,
+            "total_prompt_tokens": 100,
+            "total_completion_tokens": 50,
+            "total_cache_read_input_tokens": 0,
+            "total_cache_creation_input_tokens": 0,
+            "total_api_requests": 1,
+            "total_successful_requests": 1,
+            "total_failed_requests": 0,
+        }
     ]
-    key_breakdown_rows = [
+    key_rows = [
         {
             **base,
             "date": "2024-01-01",
@@ -716,7 +784,7 @@ async def test_aggregated_activity_preserves_metadata_for_deleted_keys():
         },
     ]
 
-    mock_prisma.db.query_raw = AsyncMock(side_effect=[rollup_rows, key_breakdown_rows])
+    mock_prisma.db.query_raw = AsyncMock(side_effect=[count_rows, key_rows])
 
     # Active table returns nothing for this key
     mock_prisma.db.litellm_verificationtoken = MagicMock()
@@ -731,16 +799,13 @@ async def test_aggregated_activity_preserves_metadata_for_deleted_keys():
     mock_prisma.db.litellm_deletedverificationtoken = MagicMock()
     mock_prisma.db.litellm_deletedverificationtoken.find_many = AsyncMock(return_value=[mock_deleted_key])
 
-    result = await get_daily_activity_aggregated(
+    result = await get_daily_activity_api_keys(
         prisma_client=mock_prisma,
         table_name="litellm_dailyuserspend",
         entity_id_field="user_id",
         entity_id=None,
-        entity_metadata_field=None,
         start_date="2024-01-01",
         end_date="2024-01-01",
-        model=None,
-        api_key=None,
     )
 
     # Verify the deleted key's metadata is preserved
@@ -902,17 +967,18 @@ class TestAdjustDatesForTimezone:
 
 class TestBuildAggregatedSqlQuery:
     """
-    Asserts the SQL emitted by the aggregated query path stays anchored to the
-    user-supplied date range, and that the per-key breakdown statement is
-    capped to the top api_key_limit keys. The original eager query computed
-    per-key rollups for every api key in range; with an unbounded key
-    dimension that produced ~986k rows for a week of data and took the
-    Usage endpoint down with Prisma timeouts and 500s.
+    Asserts the SQL emitted by the aggregated query path stays anchored to
+    the user-supplied date range and free of per-key grouping sets, and that
+    the per-key statement ranks keys per breakdown slice. Eager per-key
+    rollups over an unbounded key dimension produced ~986k rows for a week
+    of data and took the Usage endpoint down with Prisma timeouts and 500s,
+    so the aggregated response computes only the small dimensions and
+    per-key detail lives behind get_daily_activity_api_keys.
     """
 
     @pytest.mark.parametrize("offset_minutes", [None, 0, -330, 480])
     def test_sql_date_bounds_are_user_supplied_dates(self, offset_minutes):
-        queries = _build_aggregated_sql_query(
+        sql, params = _build_aggregated_sql_query(
             table_name="litellm_dailyuserspend",
             entity_id_field="user_id",
             entity_id="user-1",
@@ -922,18 +988,27 @@ class TestBuildAggregatedSqlQuery:
             api_key=None,
             timezone_offset_minutes=offset_minutes,
         )
+        keys_sql = _build_api_key_breakdown_sql_query(
+            table_name="litellm_dailyuserspend",
+            entity_id_field="user_id",
+            entity_id="user-1",
+            start_date="2026-05-29",
+            end_date="2026-05-29",
+            timezone_offset_minutes=offset_minutes,
+        )
 
-        for sql, params in (
-            (queries.rollups_query, queries.rollups_params),
-            (queries.api_key_breakdowns_query, queries.api_key_breakdowns_params),
+        for statement, statement_params in (
+            (sql, params),
+            (keys_sql.rows_query, keys_sql.rows_params),
+            (keys_sql.count_query, keys_sql.count_params),
         ):
-            assert params[0] == "2026-05-29"
-            assert params[1] == "2026-05-29"
-            assert "date >= $1" in sql
-            assert "date <= $2" in sql
+            assert statement_params[0] == "2026-05-29"
+            assert statement_params[1] == "2026-05-29"
+            assert "date >= $1" in statement
+            assert "date <= $2" in statement
 
     def test_optional_filters_appear_in_params_in_order(self):
-        queries = _build_aggregated_sql_query(
+        sql, params = _build_aggregated_sql_query(
             table_name="litellm_dailyuserspend",
             entity_id_field="user_id",
             entity_id="user-1",
@@ -951,21 +1026,15 @@ class TestBuildAggregatedSqlQuery:
             "bedrock/global.anthropic.claude-opus-4-8",
             "sk-test",
         ]
-        assert queries.rollups_params == expected_filters
-        # The key breakdown statement appends the cap after the shared filters
-        assert queries.api_key_breakdowns_params == [
-            *expected_filters,
-            DEFAULT_API_KEY_BREAKDOWN_LIMIT,
-        ]
-        for sql in (queries.rollups_query, queries.api_key_breakdowns_query):
-            assert "model = $4" in sql
-            assert "api_key = $5" in sql
+        assert params == expected_filters
+        assert "model = $4" in sql
+        assert "api_key = $5" in sql
 
     def test_rollups_query_has_no_per_key_grouping_sets(self):
         """The rollup statement aggregates every matching row into the small
-        per-dimension buckets only; per-key sets live in the capped statement.
+        per-dimension buckets only; per-key sets live in the keys statement.
         """
-        queries = _build_aggregated_sql_query(
+        sql, _ = _build_aggregated_sql_query(
             table_name="litellm_dailyuserspend",
             entity_id_field="user_id",
             entity_id=None,
@@ -973,6 +1042,13 @@ class TestBuildAggregatedSqlQuery:
             end_date="2026-09-20",
             model=None,
             api_key=None,
+        )
+        keys_sql = _build_api_key_breakdown_sql_query(
+            table_name="litellm_dailyuserspend",
+            entity_id_field="user_id",
+            entity_id=None,
+            start_date="2026-09-13",
+            end_date="2026-09-20",
         )
 
         per_key_sets = (
@@ -984,30 +1060,60 @@ class TestBuildAggregatedSqlQuery:
             "(date, endpoint, api_key)",
         )
         for grouping_set in per_key_sets:
-            assert grouping_set not in queries.rollups_query
-            assert grouping_set in queries.api_key_breakdowns_query
+            assert grouping_set not in sql
+            assert grouping_set in keys_sql.rows_query
         # api_key is never grouped in the rollup statement, so it is emitted
         # as NULL to keep the row shape shared with the dispatcher
-        assert "NULL AS api_key" in queries.rollups_query
+        assert "NULL AS api_key" in sql
 
-    def test_api_key_breakdowns_query_is_capped_to_top_keys(self):
-        queries = _build_aggregated_sql_query(
+    def test_api_keys_query_ranks_keys_per_breakdown_slice(self):
+        """Coverage must be per-slice, not one global top-N: a key can be the
+        biggest spender for one model while ranking far below the global
+        top N, and the per-model views must still show it.
+        """
+        keys_sql = _build_api_key_breakdown_sql_query(
             table_name="litellm_dailyuserspend",
             entity_id_field="user_id",
             entity_id=None,
             start_date="2026-09-13",
             end_date="2026-09-20",
-            model=None,
-            api_key=None,
         )
 
-        key_sql = queries.api_key_breakdowns_query
-        assert "WITH top_api_keys AS" in key_sql
-        assert "ORDER BY SUM(spend) DESC, SUM(api_requests) DESC" in key_sql
-        limit_placeholder = f"LIMIT ${len(queries.api_key_breakdowns_params)}"
-        assert limit_placeholder in key_sql
+        key_sql = keys_sql.rows_query
+        for dimension in ("model", "model_group", "mcp_namespaced_tool_name", "endpoint"):
+            assert f"PARTITION BY {dimension}\n" in key_sql
+            assert f"GROUP BY {dimension}, api_key" in key_sql
+            assert f"AND {dimension} IS NOT NULL AND {dimension} <> ''" in key_sql
+        # The dispatcher folds a NULL or empty provider into one "unknown"
+        # bucket instead of dropping the row, so the provider slice must rank
+        # those rows inside that same bucket, not filter them out.
+        assert "PARTITION BY COALESCE(custom_llm_provider, '')" in key_sql
+        assert "GROUP BY COALESCE(custom_llm_provider, ''), api_key" in key_sql
+        assert "AND custom_llm_provider IS NOT NULL" not in key_sql
+        # Ranking ties break on request count so the coverage is deterministic
+        assert "ORDER BY SUM(spend) DESC, SUM(api_requests) DESC, api_key" in key_sql
+        # The global ranking is paged
+        assert f"LIMIT ${len(keys_sql.rows_params) - 1}" in key_sql
+        assert f"OFFSET ${len(keys_sql.rows_params)}" in key_sql
         assert "api_key IN (SELECT api_key FROM top_api_keys)" in key_sql
-        assert queries.api_key_breakdowns_params[-1] == DEFAULT_API_KEY_BREAKDOWN_LIMIT
+        assert keys_sql.rows_params[-2:] == [DEFAULT_API_KEY_BREAKDOWN_LIMIT, 0]
+
+    def test_api_keys_count_query_reports_key_population(self):
+        """Pagination needs the full key count and totals, not the page's."""
+        keys_sql = _build_api_key_breakdown_sql_query(
+            table_name="litellm_dailyuserspend",
+            entity_id_field="user_id",
+            entity_id=None,
+            start_date="2026-09-13",
+            end_date="2026-09-20",
+        )
+
+        count_sql = keys_sql.count_query
+        assert "COUNT(*) AS key_count" in count_sql
+        assert "GROUP BY api_key" in count_sql
+        for metric in ("spend", "prompt_tokens", "api_requests", "failed_requests"):
+            assert f"SUM({metric})" in count_sql
+        assert keys_sql.count_params == keys_sql.rows_params[: len(keys_sql.count_params)]
 
     @pytest.mark.parametrize(
         "requested,expected",
@@ -1020,18 +1126,29 @@ class TestBuildAggregatedSqlQuery:
         ],
     )
     def test_api_key_limit_defaults_and_clamps(self, requested, expected):
-        queries = _build_aggregated_sql_query(
+        keys_sql = _build_api_key_breakdown_sql_query(
             table_name="litellm_dailyuserspend",
             entity_id_field="user_id",
             entity_id=None,
             start_date="2026-09-13",
             end_date="2026-09-20",
-            model=None,
-            api_key=None,
             api_key_limit=requested,
         )
 
-        assert queries.api_key_breakdowns_params[-1] == expected
+        assert keys_sql.rows_params[-2] == expected
+
+    def test_api_keys_page_offsets_into_the_global_ranking(self):
+        keys_sql = _build_api_key_breakdown_sql_query(
+            table_name="litellm_dailyuserspend",
+            entity_id_field="user_id",
+            entity_id=None,
+            start_date="2026-09-13",
+            end_date="2026-09-20",
+            page=3,
+            api_key_limit=5,
+        )
+
+        assert keys_sql.rows_params[-2:] == [5, 10]
 
     def test_both_queries_emit_the_shared_group_level_layout(self):
         """The dispatcher buckets rows by group_level constants derived from
@@ -1039,9 +1156,9 @@ class TestBuildAggregatedSqlQuery:
         custom_llm_provider, mcp_namespaced_tool_name, endpoint). The rollup
         statement rebuilds that layout without GROUPING on api_key (which
         Postgres rejects when no grouping set contains the column), so its
-        rows land on the same constants as the key breakdown rows.
+        rows land on the same constants as the key rows.
         """
-        queries = _build_aggregated_sql_query(
+        sql, _ = _build_aggregated_sql_query(
             table_name="litellm_dailyuserspend",
             entity_id_field="user_id",
             entity_id=None,
@@ -1050,13 +1167,20 @@ class TestBuildAggregatedSqlQuery:
             model=None,
             api_key=None,
         )
+        keys_sql = _build_api_key_breakdown_sql_query(
+            table_name="litellm_dailyuserspend",
+            entity_id_field="user_id",
+            entity_id=None,
+            start_date="2026-09-13",
+            end_date="2026-09-20",
+        )
 
         assert (
             "32 + 64 * GROUPING(date) + GROUPING(model, model_group, custom_llm_provider, "
-            "mcp_namespaced_tool_name, endpoint)" in queries.rollups_query
+            "mcp_namespaced_tool_name, endpoint)" in sql
         )
-        assert "GROUPING(date, api_key, model, model_group," in queries.api_key_breakdowns_query
-        assert "endpoint) AS group_level" in queries.api_key_breakdowns_query
+        assert "GROUPING(date, api_key, model, model_group," in keys_sql.rows_query
+        assert "endpoint) AS group_level" in keys_sql.rows_query
 
         # Evaluate the rebuilt expression for every rollup set and compare
         # with the dispatcher constants, so a wrong bit weight fails here.
@@ -1098,7 +1222,7 @@ async def test_get_daily_activity_aggregated_empty_result_set():
     mock_prisma.db = MagicMock()
 
     # The grand-total () rollup row still exists even on an empty match;
-    # the top-key breakdown query simply has nothing to emit.
+    # the per-key endpoint has nothing to emit on an empty match.
     mock_rows = [
         {
             "date": None,
@@ -1119,7 +1243,7 @@ async def test_get_daily_activity_aggregated_empty_result_set():
             "failed_requests": None,
         }
     ]
-    mock_prisma.db.query_raw = AsyncMock(side_effect=[mock_rows, []])
+    mock_prisma.db.query_raw = AsyncMock(return_value=mock_rows)
 
     result = await get_daily_activity_aggregated(
         prisma_client=mock_prisma,

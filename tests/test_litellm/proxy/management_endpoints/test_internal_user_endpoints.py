@@ -2146,7 +2146,6 @@ async def test_get_user_daily_activity_aggregated_admin_global_view(monkeypatch)
         model="gpt-4",
         api_key=None,
         user_id=None,
-        api_key_limit=None,
         timezone=480,
         user_api_key_dict=admin_key_dict,
     )
@@ -2165,8 +2164,158 @@ async def test_get_user_daily_activity_aggregated_admin_global_view(monkeypatch)
         model="gpt-4",
         api_key=None,
         timezone_offset_minutes=480,
-        api_key_limit=None,
     )
+
+
+@pytest.mark.asyncio
+async def test_get_user_daily_activity_api_keys_admin_global_view(monkeypatch):
+    """
+    The per-key route delegates to get_daily_activity_api_keys with the admin
+    scope resolved (global view when user_id is omitted) and the paging
+    params forwarded.
+    """
+    from unittest.mock import AsyncMock, MagicMock
+
+    from litellm.proxy.management_endpoints.internal_user_endpoints import (
+        get_user_daily_activity_api_keys,
+    )
+
+    mock_prisma_client = MagicMock()
+    monkeypatch.setattr("litellm.proxy.proxy_server.prisma_client", mock_prisma_client)
+
+    mock_response = MagicMock()
+    mock_get_api_keys = AsyncMock(return_value=mock_response)
+    monkeypatch.setattr(
+        "litellm.proxy.management_endpoints.internal_user_endpoints.get_daily_activity_api_keys",
+        mock_get_api_keys,
+    )
+
+    admin_key_dict = UserAPIKeyAuth(
+        user_id="admin-user-001",
+        user_role=LitellmUserRoles.PROXY_ADMIN,
+    )
+
+    result = await get_user_daily_activity_api_keys(
+        start_date="2025-02-01",
+        end_date="2025-02-28",
+        user_id=None,
+        page=2,
+        limit=25,
+        timezone=480,
+        user_api_key_dict=admin_key_dict,
+    )
+
+    assert result is mock_response
+    mock_get_api_keys.assert_called_once_with(
+        prisma_client=mock_prisma_client,
+        table_name="litellm_dailyuserspend",
+        entity_id_field="user_id",
+        entity_id=None,
+        start_date="2025-02-01",
+        end_date="2025-02-28",
+        timezone_offset_minutes=480,
+        page=2,
+        api_key_limit=25,
+    )
+
+
+@pytest.mark.asyncio
+async def test_get_user_daily_activity_api_keys_pins_non_admin_to_own_user(monkeypatch):
+    """
+    A non-admin without a user_id is pinned to their own user id, and one
+    asking for another user's keys gets a 403 without hitting the helper.
+    """
+    from unittest.mock import AsyncMock, MagicMock
+
+    from fastapi import HTTPException
+
+    from litellm.proxy.management_endpoints.internal_user_endpoints import (
+        get_user_daily_activity_api_keys,
+    )
+
+    mock_prisma_client = MagicMock()
+    monkeypatch.setattr("litellm.proxy.proxy_server.prisma_client", mock_prisma_client)
+
+    mock_get_api_keys = AsyncMock()
+    monkeypatch.setattr(
+        "litellm.proxy.management_endpoints.internal_user_endpoints.get_daily_activity_api_keys",
+        mock_get_api_keys,
+    )
+
+    internal_key_dict = UserAPIKeyAuth(
+        user_id="internal-user-001",
+        user_role=LitellmUserRoles.INTERNAL_USER,
+    )
+
+    await get_user_daily_activity_api_keys(
+        start_date="2025-02-01",
+        end_date="2025-02-28",
+        user_id=None,
+        page=1,
+        limit=None,
+        timezone=None,
+        user_api_key_dict=internal_key_dict,
+    )
+
+    assert mock_get_api_keys.call_args[1]["entity_id"] == "internal-user-001"
+
+    with pytest.raises(HTTPException) as exc_info:
+        await get_user_daily_activity_api_keys(
+            start_date="2025-02-01",
+            end_date="2025-02-28",
+            user_id="someone-else",
+            page=1,
+            limit=None,
+            timezone=None,
+            user_api_key_dict=internal_key_dict,
+        )
+
+    assert exc_info.value.status_code == 403
+    assert mock_get_api_keys.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_get_user_daily_activity_api_keys_rejects_service_account_caller(monkeypatch):
+    """
+    Same security regression as the aggregated route: service-account keys
+    carry no user id and must never reach the per-key data.
+    """
+    from unittest.mock import AsyncMock, MagicMock
+
+    from fastapi import HTTPException
+
+    from litellm.proxy.management_endpoints.internal_user_endpoints import (
+        get_user_daily_activity_api_keys,
+    )
+
+    mock_prisma_client = MagicMock()
+    monkeypatch.setattr("litellm.proxy.proxy_server.prisma_client", mock_prisma_client)
+
+    mock_get_api_keys = AsyncMock()
+    monkeypatch.setattr(
+        "litellm.proxy.management_endpoints.internal_user_endpoints.get_daily_activity_api_keys",
+        mock_get_api_keys,
+    )
+
+    service_account_key = UserAPIKeyAuth(
+        user_id=None,
+        user_role=LitellmUserRoles.INTERNAL_USER,
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await get_user_daily_activity_api_keys(
+            start_date="2025-01-01",
+            end_date="2025-01-31",
+            user_id=None,
+            page=1,
+            limit=None,
+            timezone=None,
+            user_api_key_dict=service_account_key,
+        )
+
+    assert exc_info.value.status_code == 403
+    assert "Service-account keys" in str(exc_info.value.detail)
+    mock_get_api_keys.assert_not_called()
 
 
 @pytest.mark.asyncio

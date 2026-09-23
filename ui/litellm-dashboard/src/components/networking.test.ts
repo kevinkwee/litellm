@@ -165,6 +165,27 @@ describe("daily activity helpers", () => {
     expect(urlWithTeams.searchParams.get("team_ids")).toBe("team-a,team-b");
     expect(urlWithTeams.searchParams.get("exclude_team_ids")).toBe("litellm-dashboard");
   });
+
+  it("sends page and limit to the per-key daily activity endpoint", async () => {
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      text: vi.fn().mockResolvedValue(JSON.stringify({ data: [] })),
+      json: vi.fn().mockResolvedValue({ data: [] }),
+    } as any);
+    global.fetch = mockFetch as any;
+
+    await Networking.userDailyActivityApiKeysCall("token", startTime, endTime, {
+      userId: "user-1",
+      page: 2,
+      limit: 25,
+    });
+    const parsed = new URL(mockFetch.mock.calls[0][0] as string, "http://example.com");
+
+    expect(parsed.pathname).toBe("/user/daily/activity/api_keys");
+    expect(parsed.searchParams.get("user_id")).toBe("user-1");
+    expect(parsed.searchParams.get("page")).toBe("2");
+    expect(parsed.searchParams.get("limit")).toBe("25");
+  });
 });
 
 describe("UI config and public endpoints", () => {

@@ -25,6 +25,7 @@ beforeAll(() => {
 vi.mock("../../networking", () => ({
   userDailyActivityCall: vi.fn(),
   userDailyActivityAggregatedCall: vi.fn(),
+  userDailyActivityApiKeysCall: vi.fn(),
   tagListCall: vi.fn(),
 }));
 
@@ -339,6 +340,7 @@ vi.mock("@tremor/react", async () => {
 
 describe("UsagePage", () => {
   const mockUserDailyActivityAggregatedCall = vi.mocked(networking.userDailyActivityAggregatedCall);
+  const mockUserDailyActivityApiKeysCall = vi.mocked(networking.userDailyActivityApiKeysCall);
   const mockUserDailyActivityCall = vi.mocked(networking.userDailyActivityCall);
   const mockTagListCall = vi.mocked(networking.tagListCall);
   const mockUseCustomers = vi.mocked(useCustomers);
@@ -444,6 +446,93 @@ describe("UsagePage", () => {
     },
   };
 
+  const mockKeyBreakdownData = {
+    results: [
+      {
+        date: "2025-01-01",
+        metrics: {
+          spend: 0,
+          api_requests: 0,
+          successful_requests: 0,
+          failed_requests: 0,
+          total_tokens: 0,
+          prompt_tokens: 0,
+          completion_tokens: 0,
+          cache_read_input_tokens: 0,
+          cache_creation_input_tokens: 0,
+        },
+        breakdown: {
+          models: {
+            "gpt-4": {
+              metrics: {
+                spend: 0,
+                api_requests: 0,
+                successful_requests: 0,
+                failed_requests: 0,
+                total_tokens: 0,
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+              },
+              metadata: {},
+              api_key_breakdown: {
+                "sk-test123": {
+                  metrics: {
+                    spend: 125.75,
+                    api_requests: 1500,
+                    successful_requests: 1450,
+                    failed_requests: 50,
+                    total_tokens: 75000,
+                    prompt_tokens: 45000,
+                    completion_tokens: 30000,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                  },
+                  metadata: {
+                    key_alias: "Test Key",
+                    team_id: null,
+                  },
+                },
+              },
+            },
+          },
+          model_groups: {},
+          mcp_servers: {},
+          providers: {},
+          api_keys: {
+            "sk-test123": {
+              metrics: {
+                spend: 125.75,
+                api_requests: 1500,
+                successful_requests: 1450,
+                failed_requests: 50,
+                total_tokens: 75000,
+                prompt_tokens: 45000,
+                completion_tokens: 30000,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+              },
+              metadata: {
+                key_alias: "Test Key",
+                team_id: null,
+              },
+            },
+          },
+          entities: {},
+          endpoints: {},
+        },
+      },
+    ],
+    metadata: {
+      total_spend: 125.75,
+      total_api_requests: 1500,
+      page: 1,
+      total_pages: 1,
+      has_more: false,
+    },
+  };
+
   const mockOrganizations: Organization[] = [
     {
       organization_id: "org-123",
@@ -528,9 +617,11 @@ describe("UsagePage", () => {
       error: null,
     } as any);
     mockUserDailyActivityAggregatedCall.mockClear();
+    mockUserDailyActivityApiKeysCall.mockClear();
     mockUserDailyActivityCall.mockClear();
     mockTagListCall.mockClear();
     mockUserDailyActivityAggregatedCall.mockResolvedValue(mockSpendData);
+    mockUserDailyActivityApiKeysCall.mockResolvedValue(mockKeyBreakdownData);
     mockUseInfiniteUsers.mockReturnValue({
       data: {
         pages: [
@@ -563,6 +654,35 @@ describe("UsagePage", () => {
       isLoading: false,
       error: null,
     } as any);
+  });
+
+  it("should fetch per-key breakdowns on mount alongside the aggregated data", async () => {
+    renderWithProviders(<UsagePage {...defaultProps} />);
+
+    await waitFor(() => {
+      expect(mockUserDailyActivityAggregatedCall).toHaveBeenCalled();
+    });
+    await waitFor(() => {
+      expect(mockUserDailyActivityApiKeysCall).toHaveBeenCalledWith("test-token", expect.any(Date), expect.any(Date), {
+        userId: null,
+      });
+    });
+  });
+
+  it("should keep the page usable when the per-key breakdown fetch fails", async () => {
+    mockUserDailyActivityApiKeysCall.mockRejectedValue(new Error("Per-key endpoint not available"));
+
+    renderWithProviders(<UsagePage {...defaultProps} />);
+
+    await waitFor(() => {
+      expect(mockUserDailyActivityAggregatedCall).toHaveBeenCalled();
+    });
+
+    // The metrics card renders from the aggregated data alone; locale-formatted
+    // numbers are not asserted here because their separators differ by Node ICU
+    // (Node 20 renders 1500 as "1,500", Node 22 on this machine as "1.500").
+    const totalRequestElements = screen.getAllByText("Total Requests");
+    expect(totalRequestElements.length).toBeGreaterThan(0);
   });
 
   it("should render and fetch usage data on mount", async () => {

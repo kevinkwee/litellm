@@ -14446,6 +14446,32 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/user/daily/activity/api_keys": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get User Daily Activity Api Keys
+         * @description Per-key daily activity for the keys a client is about to render.
+         *
+         *     The aggregated endpoint returns no per-key rows because the key
+         *     dimension is unbounded. This endpoint serves the top `limit` keys by
+         *     spend within every breakdown slice plus the `page`-th page of the
+         *     global spend ranking, in the same per-date breakdown shape so a client
+         *     can merge them into the aggregated response.
+         */
+        get: operations["get_user_daily_activity_api_keys_user_daily_activity_api_keys_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/user/delete": {
         parameters: {
             query?: never;
@@ -51101,6 +51127,48 @@ export interface operations {
                 api_key?: string | null;
                 /** @description Filter by specific user ID. Admins can filter by any user or omit for global view. Non-admins must provide their own user_id. */
                 user_id?: string | null;
+                /** @description Timezone offset in minutes from UTC (e.g., 480 for PST). Matches JavaScript's Date.getTimezoneOffset() convention. */
+                timezone?: number | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SpendAnalyticsPaginatedResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_user_daily_activity_api_keys_user_daily_activity_api_keys_get: {
+        parameters: {
+            query?: {
+                /** @description Start date in YYYY-MM-DD format */
+                start_date?: string | null;
+                /** @description End date in YYYY-MM-DD format */
+                end_date?: string | null;
+                /** @description Filter by specific user ID. Admins can filter by any user or omit for global view. Non-admins must provide their own user_id. */
+                user_id?: string | null;
+                /** @description Page of the global spend ranking of api keys. */
+                page?: number;
+                /** @description Top N api keys by spend kept per breakdown slice and per page of the global ranking. Defaults to 50. */
+                limit?: number | null;
                 /** @description Timezone offset in minutes from UTC (e.g., 480 for PST). Matches JavaScript's Date.getTimezoneOffset() convention. */
                 timezone?: number | null;
             };

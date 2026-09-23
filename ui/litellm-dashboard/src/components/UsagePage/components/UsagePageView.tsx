@@ -36,7 +36,13 @@ import { ActivityMetrics, processActivityData } from "../../activity_metrics";
 import CloudZeroExportModal from "../../cloudzero_export_modal";
 import EntityUsageExportModal from "../../EntityUsageExport";
 import { Team } from "../../key_team_helpers/key_list";
-import { Organization, tagListCall, userDailyActivityAggregatedCall, userDailyActivityCall } from "../../networking";
+import {
+  Organization,
+  tagListCall,
+  userDailyActivityAggregatedCall,
+  userDailyActivityApiKeysCall,
+  userDailyActivityCall,
+} from "../../networking";
 import AdvancedDatePicker from "../../shared/advanced_date_picker";
 import { ChartLoader } from "../../shared/chart_loader";
 import { Tag } from "../../tag_management/types";
@@ -44,6 +50,7 @@ import UserAgentActivity from "../../user_agent_activity";
 import ViewUserSpend from "../../view_user_spend";
 import { usePaginatedDailyActivity } from "../hooks/usePaginatedDailyActivity";
 import { DailyData, KeyMetricWithMetadata, MetricWithMetadata } from "../types";
+import { mergeApiKeyBreakdowns } from "../utils/merge_api_key_breakdowns";
 import { valueFormatterSpend } from "../utils/value_formatters";
 import EndpointUsage from "./EndpointUsage/EndpointUsage";
 import EntityUsage, { EntityList } from "./EntityUsage/EntityUsage";
@@ -63,6 +70,8 @@ const UsagePage: React.FC<UsagePageProps> = ({ teams, organizations }) => {
   const [aggregatedData, setAggregatedData] = useState<{ results: DailyData[]; metadata: any } | null>(null);
   const [aggregatedFailed, setAggregatedFailed] = useState(false);
   const [aggregatedLoading, setAggregatedLoading] = useState(false);
+  // Per-key endpoint: fills the per-key breakdowns the aggregated response omits
+  const [apiKeyBreakdownData, setApiKeyBreakdownData] = useState<{ results: DailyData[]; metadata: any } | null>(null);
 
   // Separate loading states for better UX
   const [isDateChanging, setIsDateChanging] = useState(false);
@@ -189,6 +198,7 @@ const UsagePage: React.FC<UsagePageProps> = ({ teams, organizations }) => {
     setAggregatedLoading(true);
     setAggregatedFailed(false);
     setAggregatedData(null);
+    setApiKeyBreakdownData(null);
 
     userDailyActivityAggregatedCall(accessToken, startTime, endTime, effectiveUserId)
       .then((data) => {
@@ -202,6 +212,18 @@ const UsagePage: React.FC<UsagePageProps> = ({ teams, organizations }) => {
         setAggregatedFailed(true);
         setAggregatedLoading(false);
       });
+
+    // The per-key breakdowns load on their own: a failure here only empties
+    // the per-key views, it must not take the whole page down.
+    userDailyActivityApiKeysCall(accessToken, startTime, endTime, { userId: effectiveUserId })
+      .then((data) => {
+        if (aggregatedFetchIdRef.current !== fetchId) return;
+        setApiKeyBreakdownData(data);
+      })
+      .catch((error) => {
+        if (aggregatedFetchIdRef.current !== fetchId) return;
+        console.error("Failed to fetch per-key user daily activity:", error);
+      });
   }, [accessToken, startTime, endTime, effectiveUserId]);
 
   // Paginated fallback — only enabled when aggregated endpoint fails
@@ -213,10 +235,15 @@ const UsagePage: React.FC<UsagePageProps> = ({ teams, organizations }) => {
 
   // Derive userSpendData from whichever source is active
   const userSpendData = useMemo(() => {
-    if (aggregatedData) return aggregatedData;
+    if (aggregatedData) {
+      return {
+        results: mergeApiKeyBreakdowns(aggregatedData.results, apiKeyBreakdownData?.results ?? []),
+        metadata: aggregatedData.metadata,
+      };
+    }
     if (aggregatedFailed) return paginatedResult.data;
     return { results: [] as DailyData[], metadata: {} as any };
-  }, [aggregatedData, aggregatedFailed, paginatedResult.data]);
+  }, [aggregatedData, apiKeyBreakdownData, aggregatedFailed, paginatedResult.data]);
 
   const loading = aggregatedLoading || paginatedResult.loading;
 

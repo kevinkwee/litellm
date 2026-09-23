@@ -1,7 +1,7 @@
 import asyncio
 from datetime import datetime
 from types import SimpleNamespace
-from typing import Any, Awaitable, Callable, Dict, List, NamedTuple, Optional, Set, Tuple, Union
+from typing import Any, Awaitable, Callable, Dict, List, NamedTuple, Optional, Set, Tuple, TypedDict, Union, cast
 
 from fastapi import HTTPException, status
 
@@ -34,12 +34,13 @@ _PRISMA_TO_PG_TABLE: Dict[str, str] = {
 }
 
 # api_key is the only breakdown dimension with unbounded cardinality (one
-# rollup row per key per model per day). Per-key breakdowns are capped to the
-# top DEFAULT_API_KEY_BREAKDOWN_LIMIT keys by spend; the dashboard only ever
-# renders the top 50 keys. Totals never depend on per-key rows, so capped
-# keys still count toward every metric.
-DEFAULT_API_KEY_BREAKDOWN_LIMIT = 100
-MAX_API_KEY_BREAKDOWN_LIMIT = 1000
+# rollup row per key per model per day), so per-key detail is served by a
+# dedicated endpoint instead of being embedded in the aggregated response.
+# That endpoint keeps the top N keys by spend per breakdown slice plus a page
+# of the global ranking; N is deep enough for every top-key view the
+# dashboards render, and deeper pages stay available via pagination.
+DEFAULT_API_KEY_BREAKDOWN_LIMIT = 50
+MAX_API_KEY_BREAKDOWN_LIMIT = 200
 
 
 def update_metrics(existing_metrics: SpendMetrics, record: Any) -> SpendMetrics:
@@ -449,13 +450,20 @@ def _build_aggregated_sql_filters(
     return " AND ".join(sql_conditions), sql_params
 
 
-class _AggregatedSpendQueries(NamedTuple):
-    """The two raw SQL statements behind the aggregated daily activity response."""
+_METRIC_SUMS = """SUM(spend)::float AS spend,
+            SUM(prompt_tokens)::bigint AS prompt_tokens,
+            SUM(completion_tokens)::bigint AS completion_tokens,
+            SUM(cache_read_input_tokens)::bigint AS cache_read_input_tokens,
+            SUM(cache_creation_input_tokens)::bigint AS cache_creation_input_tokens,
+            SUM(api_requests)::bigint AS api_requests,
+            SUM(successful_requests)::bigint AS successful_requests,
+            SUM(failed_requests)::bigint AS failed_requests"""
 
-    rollups_query: str
-    rollups_params: List[str]
-    api_key_breakdowns_query: str
-    api_key_breakdowns_params: List[Union[str, int]]
+
+def _resolved_api_key_limit(api_key_limit: Optional[int]) -> int:
+    """Clamp the per-slice key depth into its supported range."""
+    resolved = DEFAULT_API_KEY_BREAKDOWN_LIMIT if api_key_limit is None else api_key_limit
+    return max(1, min(resolved, MAX_API_KEY_BREAKDOWN_LIMIT))
 
 
 def _build_aggregated_sql_query(
@@ -469,26 +477,18 @@ def _build_aggregated_sql_query(
     api_key: Optional[str],
     exclude_entity_ids: Optional[List[str]] = None,
     timezone_offset_minutes: Optional[int] = None,
-    api_key_limit: Optional[int] = None,
-) -> _AggregatedSpendQueries:
-    """Build the raw SQL pair for the aggregated daily activity response.
+) -> Tuple[str, List[str]]:
+    """Build the SQL that aggregates daily activity into the small dimensions.
 
-    The rollup statement aggregates every matching row into the per-date,
-    per-model, per-model-group, per-provider, per-mcp-tool, per-endpoint and
-    grand-total buckets; its output is bounded by those dimensions'
-    cardinality, which is small.
-
-    The api-key statement emits the per-key sub-breakdowns, restricted to the
-    top `api_key_limit` keys by spend. Every other dimension is small, but
-    api_key has one rollup row per key per model per day, so per-key rollups
-    over all keys scale with keys x models x days and dwarf the top-N views
-    any consumer renders. Keys outside the cap still count toward every
-    total; they just have no per-key breakdown rows.
+    Groups every matching row into the per-date, per-model, per-model-group,
+    per-provider, per-mcp-tool, per-endpoint and grand-total buckets via
+    GROUPING SETS. Those dimensions are small, so the result is bounded by
+    their cardinality. Per-key rollups are intentionally absent: api_key has
+    one rollup row per key per model per day, so per-key detail scales with
+    the key population and is served by ``get_daily_activity_api_keys``.
 
     Returns:
-        Both queries emit group_level in the same 7-column GROUPING bit
-        layout the dispatcher constants assume, so their rows can be
-        dispatched through one code path.
+        Tuple of (sql_query, params_list) ready for prisma_client.db.query_raw().
     """
     pg_table = _PRISMA_TO_PG_TABLE.get(table_name)
     if pg_table is None:
@@ -505,18 +505,6 @@ def _build_aggregated_sql_query(
         timezone_offset_minutes=timezone_offset_minutes,
     )
 
-    resolved_limit = DEFAULT_API_KEY_BREAKDOWN_LIMIT if api_key_limit is None else api_key_limit
-    key_limit = max(1, min(resolved_limit, MAX_API_KEY_BREAKDOWN_LIMIT))
-
-    metric_sums = """SUM(spend)::float AS spend,
-            SUM(prompt_tokens)::bigint AS prompt_tokens,
-            SUM(completion_tokens)::bigint AS completion_tokens,
-            SUM(cache_read_input_tokens)::bigint AS cache_read_input_tokens,
-            SUM(cache_creation_input_tokens)::bigint AS cache_creation_input_tokens,
-            SUM(api_requests)::bigint AS api_requests,
-            SUM(successful_requests)::bigint AS successful_requests,
-            SUM(failed_requests)::bigint AS failed_requests"""
-
     # GROUPING() rejects columns that no grouping set of the query contains,
     # so the rollup query cannot call GROUPING with all 7 arguments. It
     # rebuilds the shared 7-bit layout instead: the api_key bit is constant 1
@@ -528,7 +516,7 @@ def _build_aggregated_sql_query(
         "mcp_namespaced_tool_name, endpoint) AS group_level"
     )
 
-    rollups_query = f"""
+    sql_query = f"""
         SELECT
             date,
             NULL AS api_key,
@@ -538,7 +526,7 @@ def _build_aggregated_sql_query(
             mcp_namespaced_tool_name,
             endpoint,
             {rollup_group_level},
-            {metric_sums}
+            {_METRIC_SUMS}
         FROM "{pg_table}"
         WHERE {where_clause}
         GROUP BY GROUPING SETS (
@@ -552,16 +540,150 @@ def _build_aggregated_sql_query(
         )
     """
 
+    return sql_query, where_params
+
+
+class _ApiKeyBreakdownSql(NamedTuple):
+    """The statements behind the per-key daily activity response."""
+
+    rows_query: str
+    rows_params: List[Union[str, int]]
+    count_query: str
+    count_params: List[str]
+
+
+class _ApiKeyPopulationRow(TypedDict, total=False):
+    """One row from the per-key count statement.
+
+    Every field is optional because the caller guards the untyped query_raw
+    result with an empty-dict fallback, and that fallback only satisfies the
+    row type when nothing is required.
+    """
+
+    key_count: int
+    total_spend: float
+    total_prompt_tokens: int
+    total_completion_tokens: int
+    total_cache_read_input_tokens: int
+    total_cache_creation_input_tokens: int
+    total_api_requests: int
+    total_successful_requests: int
+    total_failed_requests: int
+
+
+def _slice_ranking_block(
+    *,
+    pg_table: str,
+    where_clause: str,
+    dimension: str,
+    limit_placeholder: str,
+) -> str:
+    """One UNION block ranking the top keys inside a single breakdown slice.
+
+    The dispatcher drops rows whose slice column is NULL or empty for every
+    dimension except custom_llm_provider, which it folds into one "unknown"
+    bucket. The ranking keeps exactly the rows the dispatcher keeps: strict
+    NULL/empty guards for the dropped dimensions, and a COALESCE partition for
+    the provider so its "unknown" bucket ranks its own top keys.
+    """
+    if dimension == "custom_llm_provider":
+        partition = "COALESCE(custom_llm_provider, '')"
+        slice_guard = ""
+    else:
+        partition = dimension
+        slice_guard = f"\n                          AND {dimension} IS NOT NULL AND {dimension} <> ''"
+    return f"""            SELECT api_key
+                FROM (
+                    SELECT api_key,
+                           row_number() OVER (
+                               PARTITION BY {partition}
+                               ORDER BY SUM(spend) DESC, SUM(api_requests) DESC
+                           ) AS rank_in_slice
+                    FROM "{pg_table}"
+                    WHERE {where_clause} AND api_key IS NOT NULL AND api_key <> ''{slice_guard}
+                    GROUP BY {partition}, api_key
+                ) ranked
+                WHERE rank_in_slice <= {limit_placeholder}"""
+
+
+def _build_api_key_breakdown_sql_query(
+    *,
+    table_name: str,
+    entity_id_field: str,
+    entity_id: Optional[Union[str, List[str]]],
+    start_date: str,
+    end_date: str,
+    timezone_offset_minutes: Optional[int] = None,
+    page: int = 1,
+    api_key_limit: Optional[int] = None,
+) -> _ApiKeyBreakdownSql:
+    """Build the SQL pair behind the per-key daily activity response.
+
+    The rows statement computes the per-key grouping sets for the keys the
+    response covers. Coverage is the union of the top ``api_key_limit`` keys
+    by spend within every breakdown slice (a key can be the biggest spender
+    for one model while ranking far below the global top N) plus the
+    requested page of the global spend ranking, so per-slice views render
+    exact top-N lists and deeper global pages stay available.
+
+    Returns:
+        An ``_ApiKeyBreakdownSql`` pair: the rows statement and the count
+        statement, which reports the number of distinct keys in the date
+        range (pagination totals) and their range-wide metric sums.
+    """
+    pg_table = _PRISMA_TO_PG_TABLE.get(table_name)
+    if pg_table is None:
+        raise ValueError(f"Unknown table name: {table_name}")
+
+    where_clause, where_params = _build_aggregated_sql_filters(
+        entity_id_field=entity_id_field,
+        entity_id=entity_id,
+        start_date=start_date,
+        end_date=end_date,
+        model=None,
+        api_key=None,
+        exclude_entity_ids=None,
+        timezone_offset_minutes=timezone_offset_minutes,
+    )
+
+    key_limit = _resolved_api_key_limit(api_key_limit)
+    resolved_page = max(1, page)
+    limit_placeholder = f"${len(where_params) + 1}"
+    offset_placeholder = f"${len(where_params) + 2}"
+
     # SUM(api_requests) breaks spend ties so zero-spend-but-active keys fill
-    # the remaining cap slots deterministically instead of by sort order.
-    api_key_breakdowns_query = f"""
+    # ranking slots deterministically, and the api_key tiebreaker on the
+    # paged ranking keeps pages stable when spend and requests both tie.
+    slice_dimensions = (
+        "model",
+        "model_group",
+        "custom_llm_provider",
+        "mcp_namespaced_tool_name",
+        "endpoint",
+    )
+    ranking_blocks = "\n            UNION\n".join(
+        _slice_ranking_block(
+            pg_table=pg_table,
+            where_clause=where_clause,
+            dimension=dimension,
+            limit_placeholder=limit_placeholder,
+        )
+        for dimension in slice_dimensions
+    )
+
+    rows_query = f"""
         WITH top_api_keys AS (
+            {ranking_blocks}
+            UNION
             SELECT api_key
-            FROM "{pg_table}"
-            WHERE {where_clause} AND api_key IS NOT NULL AND api_key <> ''
-            GROUP BY api_key
-            ORDER BY SUM(spend) DESC, SUM(api_requests) DESC
-            LIMIT ${len(where_params) + 1}
+            FROM (
+                SELECT api_key
+                FROM "{pg_table}"
+                WHERE {where_clause} AND api_key IS NOT NULL AND api_key <> ''
+                GROUP BY api_key
+                ORDER BY SUM(spend) DESC, SUM(api_requests) DESC, api_key
+                LIMIT {limit_placeholder} OFFSET {offset_placeholder}
+            ) global_page
         )
         SELECT
             date,
@@ -574,7 +696,7 @@ def _build_aggregated_sql_query(
             GROUPING(date, api_key, model, model_group,
                      custom_llm_provider, mcp_namespaced_tool_name,
                      endpoint) AS group_level,
-            {metric_sums}
+            {_METRIC_SUMS}
         FROM "{pg_table}"
         WHERE {where_clause} AND api_key IN (SELECT api_key FROM top_api_keys)
         GROUP BY GROUPING SETS (
@@ -587,11 +709,38 @@ def _build_aggregated_sql_query(
         )
     """
 
-    return _AggregatedSpendQueries(
-        rollups_query=rollups_query,
-        rollups_params=where_params,
-        api_key_breakdowns_query=api_key_breakdowns_query,
-        api_key_breakdowns_params=[*where_params, key_limit],
+    count_query = f"""
+        SELECT
+            COUNT(*) AS key_count,
+            COALESCE(SUM(spend), 0)::float AS total_spend,
+            COALESCE(SUM(prompt_tokens), 0)::bigint AS total_prompt_tokens,
+            COALESCE(SUM(completion_tokens), 0)::bigint AS total_completion_tokens,
+            COALESCE(SUM(cache_read_input_tokens), 0)::bigint AS total_cache_read_input_tokens,
+            COALESCE(SUM(cache_creation_input_tokens), 0)::bigint AS total_cache_creation_input_tokens,
+            COALESCE(SUM(api_requests), 0)::bigint AS total_api_requests,
+            COALESCE(SUM(successful_requests), 0)::bigint AS total_successful_requests,
+            COALESCE(SUM(failed_requests), 0)::bigint AS total_failed_requests
+        FROM (
+            SELECT api_key,
+                   SUM(spend)::float AS spend,
+                   SUM(prompt_tokens)::bigint AS prompt_tokens,
+                   SUM(completion_tokens)::bigint AS completion_tokens,
+                   SUM(cache_read_input_tokens)::bigint AS cache_read_input_tokens,
+                   SUM(cache_creation_input_tokens)::bigint AS cache_creation_input_tokens,
+                   SUM(api_requests)::bigint AS api_requests,
+                   SUM(successful_requests)::bigint AS successful_requests,
+                   SUM(failed_requests)::bigint AS failed_requests
+            FROM "{pg_table}"
+            WHERE {where_clause} AND api_key IS NOT NULL AND api_key <> ''
+            GROUP BY api_key
+        ) per_key
+    """
+
+    return _ApiKeyBreakdownSql(
+        rows_query=rows_query,
+        rows_params=[*where_params, key_limit, (resolved_page - 1) * key_limit],
+        count_query=count_query,
+        count_params=where_params,
     )
 
 
@@ -985,15 +1134,14 @@ async def get_daily_activity_aggregated(
     api_key: Optional[str],
     exclude_entity_ids: Optional[List[str]] = None,
     timezone_offset_minutes: Optional[int] = None,
-    api_key_limit: Optional[int] = None,
 ) -> SpendAnalyticsPaginatedResponse:
-    """Aggregated variant that returns the full result set (no pagination).
+    """Aggregated daily activity across the small breakdown dimensions.
 
-    Uses SQL GROUP BY to aggregate rows in the database rather than fetching
-    all individual rows into Python. This collapses rows across entities
-    (users/teams/orgs), and caps the per-key breakdowns to the top
-    ``api_key_limit`` keys by spend so a high-cardinality key dimension
-    cannot balloon the result set; every total stays exact.
+    Aggregates rows in the database instead of fetching them into Python,
+    collapsing the result to one row per (date x dimension value) plus
+    per-date and grand totals. Per-key breakdowns are empty here because the
+    key dimension is unbounded; ``get_daily_activity_api_keys`` serves them
+    on demand for the keys a client is about to render.
 
     Matches the response model of the paginated endpoint so the UI does not need to transform.
     """
@@ -1010,7 +1158,7 @@ async def get_daily_activity_aggregated(
         )
 
     try:
-        queries = _build_aggregated_sql_query(
+        sql_query, sql_params = _build_aggregated_sql_query(
             table_name=table_name,
             entity_id_field=entity_id_field,
             entity_id=entity_id,
@@ -1020,17 +1168,10 @@ async def get_daily_activity_aggregated(
             api_key=api_key,
             exclude_entity_ids=exclude_entity_ids,
             timezone_offset_minutes=timezone_offset_minutes,
-            api_key_limit=api_key_limit,
         )
 
-        rollup_rows = await prisma_client.db.query_raw(queries.rollups_query, *queries.rollups_params)
-        key_breakdown_rows = await prisma_client.db.query_raw(
-            queries.api_key_breakdowns_query, *queries.api_key_breakdowns_params
-        )
-
-        rows = [*(rollup_rows or []), *(key_breakdown_rows or [])]
-
-        records = [SimpleNamespace(**row) for row in rows]
+        rows = await prisma_client.db.query_raw(sql_query, *sql_params)
+        records = [SimpleNamespace(**row) for row in rows or []]
 
         # The grouping-sets dispatcher places each row directly in its bucket
         # using the row's GROUPING() bitmask. No Python-side summing needed.
@@ -1059,6 +1200,96 @@ async def get_daily_activity_aggregated(
 
     except Exception as e:
         verbose_proxy_logger.exception(f"Error fetching aggregated daily activity: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error": f"Failed to fetch analytics: {str(e)}"},
+        )
+
+
+async def get_daily_activity_api_keys(
+    prisma_client: Optional[PrismaClient],
+    table_name: str,
+    entity_id_field: str,
+    entity_id: Optional[Union[str, List[str]]],
+    start_date: Optional[str],
+    end_date: Optional[str],
+    timezone_offset_minutes: Optional[int] = None,
+    page: int = 1,
+    api_key_limit: Optional[int] = None,
+) -> SpendAnalyticsPaginatedResponse:
+    """Per-key daily activity for the keys a client is about to render.
+
+    The aggregated endpoint omits per-key rows because the key dimension is
+    unbounded. This endpoint provides them for the top ``api_key_limit``
+    keys by spend within every breakdown slice plus the ``page``-th page of
+    the global spend ranking, in the same per-date breakdown shape so a
+    client can merge them into the aggregated response.
+
+    Metadata totals cover key-attributed rows in the date range; the
+    aggregated endpoint remains the source of range-wide totals.
+    """
+    if prisma_client is None:
+        raise HTTPException(
+            status_code=500,
+            detail={"error": CommonProxyErrors.db_not_connected_error.value},
+        )
+
+    if start_date is None or end_date is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "Please provide start_date and end_date"},
+        )
+
+    try:
+        queries = _build_api_key_breakdown_sql_query(
+            table_name=table_name,
+            entity_id_field=entity_id_field,
+            entity_id=entity_id,
+            start_date=start_date,
+            end_date=end_date,
+            timezone_offset_minutes=timezone_offset_minutes,
+            page=page,
+            api_key_limit=api_key_limit,
+        )
+
+        count_rows = await prisma_client.db.query_raw(queries.count_query, *queries.count_params)
+        # query_raw is untyped; the count statement always emits these columns
+        count_row = cast(_ApiKeyPopulationRow, (count_rows or [{}])[0])
+
+        rows = await prisma_client.db.query_raw(queries.rows_query, *queries.rows_params)
+        records = [SimpleNamespace(**row) for row in rows or []]
+
+        aggregated = await _aggregate_grouping_sets_records(
+            prisma_client=prisma_client,
+            records=records,
+        )
+
+        key_count = int(count_row.get("key_count") or 0)
+        key_limit = _resolved_api_key_limit(api_key_limit)
+        resolved_page = max(1, page)
+        total_prompt_tokens = int(count_row.get("total_prompt_tokens") or 0)
+        total_completion_tokens = int(count_row.get("total_completion_tokens") or 0)
+
+        return SpendAnalyticsPaginatedResponse(
+            results=aggregated["results"],
+            metadata=DailySpendMetadata(
+                total_spend=float(count_row.get("total_spend") or 0.0),
+                total_prompt_tokens=total_prompt_tokens,
+                total_completion_tokens=total_completion_tokens,
+                total_tokens=total_prompt_tokens + total_completion_tokens,
+                total_api_requests=int(count_row.get("total_api_requests") or 0),
+                total_successful_requests=int(count_row.get("total_successful_requests") or 0),
+                total_failed_requests=int(count_row.get("total_failed_requests") or 0),
+                total_cache_read_input_tokens=int(count_row.get("total_cache_read_input_tokens") or 0),
+                total_cache_creation_input_tokens=int(count_row.get("total_cache_creation_input_tokens") or 0),
+                page=resolved_page,
+                total_pages=-(-key_count // key_limit),
+                has_more=(resolved_page * key_limit) < key_count,
+            ),
+        )
+
+    except Exception as e:
+        verbose_proxy_logger.exception(f"Error fetching per-key daily activity: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail={"error": f"Failed to fetch analytics: {str(e)}"},

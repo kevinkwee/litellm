@@ -29,9 +29,11 @@ from litellm.proxy.auth.auth_checks import get_team_object, get_user_object
 from litellm.proxy.auth.user_api_key_auth import user_api_key_auth
 from litellm.proxy.hooks.user_management_event_hooks import UserManagementEventHooks
 from litellm.proxy.management_endpoints.common_daily_activity import (
+    DEFAULT_API_KEY_BREAKDOWN_LIMIT,
     MAX_API_KEY_BREAKDOWN_LIMIT,
     get_daily_activity,
     get_daily_activity_aggregated,
+    get_daily_activity_api_keys,
 )
 from litellm.proxy.management_endpoints.common_utils import (
     _is_user_team_admin,
@@ -2441,6 +2443,25 @@ async def _resolve_user_email_metadata(prisma_client: "PrismaClient", records: l
     return {user.user_id: {"user_email": user.user_email, "user_alias": user.user_alias} for user in users}
 
 
+def _resolve_daily_activity_entity_id(user_api_key_dict: UserAPIKeyAuth, user_id: Optional[str]) -> Optional[str]:
+    """Resolve the user scope shared by the daily activity routes.
+
+    Admins may view any user or the global view (None); everyone else is
+    pinned to their own user id. Raises 403 when a non-admin caller asks
+    for another user's spend data.
+    """
+    if _user_has_admin_view(user_api_key_dict):
+        return user_id
+    caller_user_id = require_caller_user_id_for_non_admin(user_api_key_dict)
+    resolved_user_id = user_id if user_id is not None else caller_user_id
+    if resolved_user_id != caller_user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"error": "Non-admin users can only view their own spend data."},
+        )
+    return resolved_user_id
+
+
 @router.get(
     "/user/daily/activity",
     tags=["Budget & Spend Tracking", "Internal User management"],
@@ -2509,20 +2530,7 @@ async def get_user_daily_activity(
         )
 
     try:
-        is_admin = _user_has_admin_view(user_api_key_dict)
-
-        if is_admin:
-            entity_id = user_id  # None means global view, otherwise filter by user
-        else:
-            caller_user_id = require_caller_user_id_for_non_admin(user_api_key_dict)
-            if user_id is None:
-                user_id = caller_user_id
-            if user_id != caller_user_id:
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail={"error": "Non-admin users can only view their own spend data."},
-                )
-            entity_id = user_id
+        entity_id = _resolve_daily_activity_entity_id(user_api_key_dict, user_id)
 
         return await get_daily_activity(
             prisma_client=prisma_client,
@@ -2578,14 +2586,6 @@ async def get_user_daily_activity_aggregated(
         default=None,
         description="Filter by specific user ID. Admins can filter by any user or omit for global view. Non-admins must provide their own user_id.",
     ),
-    api_key_limit: Optional[int] = fastapi.Query(
-        default=None,
-        ge=1,
-        le=MAX_API_KEY_BREAKDOWN_LIMIT,
-        description="Cap the per-key breakdowns to the top N api keys by spend over the date range. "
-        "Keys outside the top N still count toward all totals; only per-key breakdown rows omit them. "
-        "Defaults to 100.",
-    ),
     timezone: Optional[int] = fastapi.Query(
         default=None,
         description="Timezone offset in minutes from UTC (e.g., 480 for PST). "
@@ -2612,20 +2612,7 @@ async def get_user_daily_activity_aggregated(
         )
 
     try:
-        is_admin = _user_has_admin_view(user_api_key_dict)
-
-        if is_admin:
-            entity_id = user_id  # None means global view, otherwise filter by user
-        else:
-            caller_user_id = require_caller_user_id_for_non_admin(user_api_key_dict)
-            if user_id is None:
-                user_id = caller_user_id
-            if user_id != caller_user_id:
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail={"error": "Non-admin users can only view their own spend data."},
-                )
-            entity_id = user_id
+        entity_id = _resolve_daily_activity_entity_id(user_api_key_dict, user_id)
 
         return await get_daily_activity_aggregated(
             prisma_client=prisma_client,
@@ -2638,13 +2625,99 @@ async def get_user_daily_activity_aggregated(
             model=model,
             api_key=api_key,
             timezone_offset_minutes=timezone,
-            api_key_limit=api_key_limit,
         )
 
     except HTTPException:
         raise
     except Exception as e:
         verbose_proxy_logger.exception("/user/daily/activity/aggregated: Exception occured - {}".format(str(e)))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error": f"Failed to fetch analytics: {str(e)}"},
+        )
+
+
+@router.get(
+    "/user/daily/activity/api_keys",
+    tags=["Budget & Spend Tracking", "Internal User management"],
+    dependencies=[Depends(user_api_key_auth)],
+    response_model=SpendAnalyticsPaginatedResponse,
+)
+@management_endpoint_wrapper
+async def get_user_daily_activity_api_keys(
+    start_date: Optional[str] = fastapi.Query(
+        default=None,
+        description="Start date in YYYY-MM-DD format",
+    ),
+    end_date: Optional[str] = fastapi.Query(
+        default=None,
+        description="End date in YYYY-MM-DD format",
+    ),
+    user_id: Optional[str] = fastapi.Query(
+        default=None,
+        description="Filter by specific user ID. Admins can filter by any user or omit for global view. Non-admins must provide their own user_id.",
+    ),
+    page: int = fastapi.Query(
+        default=1,
+        ge=1,
+        description="Page of the global spend ranking of api keys.",
+    ),
+    limit: Optional[int] = fastapi.Query(
+        default=None,
+        ge=1,
+        le=MAX_API_KEY_BREAKDOWN_LIMIT,
+        description=f"Top N api keys by spend kept per breakdown slice and per page of the global ranking. "
+        f"Defaults to {DEFAULT_API_KEY_BREAKDOWN_LIMIT}.",
+    ),
+    timezone: Optional[int] = fastapi.Query(
+        default=None,
+        description="Timezone offset in minutes from UTC (e.g., 480 for PST). "
+        "Matches JavaScript's Date.getTimezoneOffset() convention.",
+    ),
+    user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),
+) -> SpendAnalyticsPaginatedResponse:
+    """
+    Per-key daily activity for the keys a client is about to render.
+
+    The aggregated endpoint returns no per-key rows because the key
+    dimension is unbounded. This endpoint serves the top `limit` keys by
+    spend within every breakdown slice plus the `page`-th page of the
+    global spend ranking, in the same per-date breakdown shape so a client
+    can merge them into the aggregated response.
+    """
+    from litellm.proxy.proxy_server import prisma_client
+
+    if prisma_client is None:
+        raise HTTPException(
+            status_code=500,
+            detail={"error": CommonProxyErrors.db_not_connected_error.value},
+        )
+
+    if start_date is None or end_date is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "Please provide start_date and end_date"},
+        )
+
+    try:
+        entity_id = _resolve_daily_activity_entity_id(user_api_key_dict, user_id)
+
+        return await get_daily_activity_api_keys(
+            prisma_client=prisma_client,
+            table_name="litellm_dailyuserspend",
+            entity_id_field="user_id",
+            entity_id=entity_id,
+            start_date=start_date,
+            end_date=end_date,
+            timezone_offset_minutes=timezone,
+            page=page,
+            api_key_limit=limit,
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        verbose_proxy_logger.exception(f"/user/daily/activity/api_keys: Exception occured - {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail={"error": f"Failed to fetch analytics: {str(e)}"},

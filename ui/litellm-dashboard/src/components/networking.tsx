@@ -2438,6 +2438,45 @@ export const userDailyActivityAggregatedCall = async (
   }
 };
 
+export interface UserDailyActivityApiKeysOptions {
+  userId?: string | null;
+  page?: number;
+  limit?: number;
+}
+
+export const userDailyActivityApiKeysCall = async (
+  accessToken: string,
+  startTime: Date,
+  endTime: Date,
+  options: UserDailyActivityApiKeysOptions = {},
+) => {
+  /**
+   * Get per-key daily activity for the keys the Usage page renders
+   */
+  try {
+    const formatDate = (date: Date) => {
+      const year = date.getFullYear();
+      const month = String(date.getMonth() + 1).padStart(2, "0");
+      const day = String(date.getDate()).padStart(2, "0");
+      return `${year}-${month}-${day}`;
+    };
+    return await apiClient.get(`/user/daily/activity/api_keys`, {
+      accessToken,
+      query: {
+        start_date: formatDate(startTime),
+        end_date: formatDate(endTime),
+        timezone: new Date().getTimezoneOffset().toString(),
+        user_id: options.userId || undefined,
+        page: (options.page ?? 1).toString(),
+        limit: (options.limit ?? 50).toString(),
+      },
+    });
+  } catch (error) {
+    console.error("Failed to fetch per-key user daily activity:", error);
+    throw error;
+  }
+};
+
 export const getPossibleUserRoles = async (accessToken: string) => {
   try {
     const data = (await apiClient.get(`/user/available_roles`, { accessToken })) as Record<
