@@ -1515,9 +1515,19 @@ def _apply_assistant_reasoning_field(
 ) -> List[AllMessageValues]:
     """
     Rename reasoning on assistant messages to the wire field the target
-    backend reads. None keeps the canonical ``reasoning_content``.
+    backend reads. None and empty strings keep the canonical
+    ``reasoning_content``. Any other value must be a known reasoning wire
+    field, otherwise the request fails so a typo cannot silently drop
+    reasoning.
     """
     target_field = assistant_reasoning_field or _DEFAULT_ASSISTANT_REASONING_FIELD
+    if target_field not in _REASONING_MESSAGE_FIELDS:
+        valid_fields = ", ".join(repr(field) for field in _REASONING_MESSAGE_FIELDS)
+        raise litellm.BadRequestError(
+            message=f"Invalid assistant_reasoning_field {target_field!r}. Valid values: {valid_fields}.",
+            model=None,
+            llm_provider=None,
+        )
     return [
         _rename_message_reasoning_field(message, target_field) if message.get("role") == "assistant" else message
         for message in messages

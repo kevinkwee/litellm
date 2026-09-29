@@ -254,7 +254,8 @@ class GenericLiteLLMParams(CredentialLiteLLMParams, CustomPricingLiteLLMParams):
             "Defaults to 'reasoning_content'. Set to 'reasoning' for backends that expect "
             "the short spelling, e.g. Ollama's OpenAI-compatible API. An unset value "
             "still normalizes an inbound 'reasoning' key on assistant messages to "
-            "'reasoning_content'."
+            "'reasoning_content'. On the OpenAI-compatible path, any non-empty value "
+            "other than 'reasoning_content' or 'reasoning' fails the request."
         ),
     )
     model_info: Optional[Dict] = None

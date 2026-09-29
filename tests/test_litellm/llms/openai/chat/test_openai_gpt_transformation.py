@@ -745,10 +745,10 @@ class TestCacheControlPreservationForCustomEndpoint:
 
 class TestAssistantReasoningField:
     """``assistant_reasoning_field`` on litellm_params selects the wire field
-    reasoning is sent back on for assistant messages. Ollama's
+    that reasoning is sent back on for assistant messages. Ollama's
     OpenAI-compatible API reads ``reasoning`` while the canonical LiteLLM
     client field is ``reasoning_content``, so deployments pointed at such
-    backends rename per deployment."""
+    backends rename per deployment. An unknown value fails the request."""
 
     def setup_method(self):
         self.config = OpenAIGPTConfig()
@@ -816,3 +816,22 @@ class TestAssistantReasoningField:
         )
         assert body["messages"][1]["reasoning"] == "thoughts"
         assert "reasoning_content" not in body["messages"][1]
+
+    def test_unknown_field_fails_request(self):
+        with pytest.raises(litellm.BadRequestError, match="reasaning"):
+            self._transform(assistant_reasoning_field="reasaning")
+
+    @pytest.mark.asyncio
+    async def test_async_path_unknown_field_fails_request(self):
+        with pytest.raises(litellm.BadRequestError, match="reasaning"):
+            await self.config.async_transform_request(
+                model="glm-5.3",
+                messages=self._reasoning_messages(),
+                optional_params={},
+                litellm_params={
+                    "custom_llm_provider": "openai",
+                    "api_base": "http://localhost:11434/v1",
+                    "assistant_reasoning_field": "reasaning",
+                },
+                headers={},
+            )

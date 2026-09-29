@@ -2,6 +2,7 @@ import json
 import os
 import sys
 
+import litellm
 import pytest
 
 sys.path.insert(0, os.path.abspath("../../.."))  # Adds the parent directory to the system path
@@ -710,7 +711,8 @@ class TestApplyAssistantReasoningField:
     client-facing field is ``reasoning_content``, so a per-deployment rename
     is needed on the way out. The helper must also accept either inbound
     spelling (clients may send ``reasoning``), leave non-assistant messages
-    alone, and invent nothing when no reasoning is present."""
+    alone, invent nothing when no reasoning is present, and reject unknown
+    target fields."""
 
     def test_default_field_untouched(self):
         messages = [
@@ -835,3 +837,39 @@ class TestApplyAssistantReasoningField:
 
         assert result[1]["reasoning"] == "r1"
         assert result[3]["reasoning"] == "r2"
+
+    def test_unknown_field_raises(self):
+        messages = [
+            {"role": "assistant", "content": "answer", "reasoning_content": "thoughts"},
+        ]
+
+        with pytest.raises(litellm.BadRequestError, match="reasaning"):
+            _apply_assistant_reasoning_field(messages, "reasaning")
+
+    def test_unknown_field_raises_even_without_reasoning(self):
+        messages = [
+            {"role": "user", "content": "hi"},
+        ]
+
+        with pytest.raises(
+            litellm.BadRequestError,
+            match="Valid values: 'reasoning_content', 'reasoning'",
+        ):
+            _apply_assistant_reasoning_field(messages, "reasaning")
+
+    def test_non_string_field_raises(self):
+        messages = [
+            {"role": "assistant", "content": "answer", "reasoning_content": "thoughts"},
+        ]
+
+        with pytest.raises(litellm.BadRequestError, match="Invalid assistant_reasoning_field"):
+            _apply_assistant_reasoning_field(messages, 123)
+
+    def test_empty_string_keeps_default_field(self):
+        messages = [
+            {"role": "assistant", "content": "answer", "reasoning": "thoughts"},
+        ]
+
+        result = _apply_assistant_reasoning_field(messages, "")
+
+        assert result[0]["reasoning_content"] == "thoughts"
