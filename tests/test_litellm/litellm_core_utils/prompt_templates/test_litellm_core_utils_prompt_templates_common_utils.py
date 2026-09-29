@@ -1,15 +1,13 @@
 import json
 import os
 import sys
-from unittest.mock import MagicMock, patch
 
 import pytest
 
-sys.path.insert(
-    0, os.path.abspath("../../..")
-)  # Adds the parent directory to the system path
+sys.path.insert(0, os.path.abspath("../../.."))  # Adds the parent directory to the system path
 
 from litellm.litellm_core_utils.prompt_templates.common_utils import (
+    _apply_assistant_reasoning_field,
     add_system_prompt_to_messages,
     get_file_ids_from_messages,
     get_format_from_file_id,
@@ -20,9 +18,7 @@ from litellm.litellm_core_utils.prompt_templates.common_utils import (
 
 
 def test_get_format_from_file_id():
-    unified_file_id = (
-        "litellm_proxy:application/pdf;unified_id,cbbe3534-8bf8-4386-af00-f5f6b7e370bf"
-    )
+    unified_file_id = "litellm_proxy:application/pdf;unified_id,cbbe3534-8bf8-4386-af00-f5f6b7e370bf"
 
     format = get_format_from_file_id(unified_file_id)
 
@@ -49,9 +45,7 @@ def test_update_messages_with_model_file_ids():
 
     model_file_id_mapping = {file_id: {"my_model_id": "provider_file_id"}}
 
-    updated_messages = update_messages_with_model_file_ids(
-        messages, model_id, model_file_id_mapping
-    )
+    updated_messages = update_messages_with_model_file_ids(messages, model_id, model_file_id_mapping)
 
     assert updated_messages == [
         {
@@ -157,9 +151,7 @@ def test_add_system_prompt_to_messages_merge_with_first_system():
         {"role": "system", "content": "Existing system prompt."},
         {"role": "user", "content": "Hello"},
     ]
-    result = add_system_prompt_to_messages(
-        messages, "You are helpful.", merge_with_first_system=True
-    )
+    result = add_system_prompt_to_messages(messages, "You are helpful.", merge_with_first_system=True)
     assert result == [
         {"role": "system", "content": "You are helpful.\n\nExisting system prompt."},
         {"role": "user", "content": "Hello"},
@@ -169,9 +161,7 @@ def test_add_system_prompt_to_messages_merge_with_first_system():
 def test_add_system_prompt_to_messages_merge_with_first_system_adds_new_when_no_system():
     """When merge_with_first_system=True but no system message, adds new one at start."""
     messages = [{"role": "user", "content": "Hello"}]
-    result = add_system_prompt_to_messages(
-        messages, "You are helpful.", merge_with_first_system=True
-    )
+    result = add_system_prompt_to_messages(messages, "You are helpful.", merge_with_first_system=True)
     assert result == [
         {"role": "system", "content": "You are helpful."},
         {"role": "user", "content": "Hello"},
@@ -484,14 +474,8 @@ def test_update_messages_with_model_file_ids_tolerates_non_dict_content_items():
     messages_token_ids_batch = [{"role": "user", "content": [[15496, 995], [9906, 0]]}]
 
     # Both should pass through unchanged without raising.
-    assert (
-        update_messages_with_model_file_ids(messages_token_ids, "model-A", {})
-        == messages_token_ids
-    )
-    assert (
-        update_messages_with_model_file_ids(messages_token_ids_batch, "model-A", {})
-        == messages_token_ids_batch
-    )
+    assert update_messages_with_model_file_ids(messages_token_ids, "model-A", {}) == messages_token_ids
+    assert update_messages_with_model_file_ids(messages_token_ids_batch, "model-A", {}) == messages_token_ids_batch
 
 
 class TestExtractFileDataBareStr:
@@ -637,9 +621,7 @@ class TestUnpackLegacyDefs:
         definitions = {
             f"L{i}": {
                 "type": "object",
-                "properties": {
-                    f"x{j}": {"$ref": f"#/definitions/L{i + 1}"} for j in range(fanout)
-                },
+                "properties": {f"x{j}": {"$ref": f"#/definitions/L{i + 1}"} for j in range(fanout)},
             }
             for i in range(depth)
         }
@@ -704,9 +686,7 @@ class TestUnpackLegacyDefs:
 
         schema = {
             "type": "object",
-            "properties": {
-                f"r{i}": {"$ref": f"#/components/schemas/T{i}"} for i in range(50)
-            },
+            "properties": {f"r{i}": {"$ref": f"#/components/schemas/T{i}"} for i in range(50)},
             "components": {
                 "schemas": {
                     f"T{i}": {
@@ -721,3 +701,137 @@ class TestUnpackLegacyDefs:
         out = unpack_legacy_defs(schema)
         assert "components" not in out
         assert out["properties"]["r0"]["properties"]["p0"] == {"type": "string"}
+
+
+class TestApplyAssistantReasoningField:
+    """``assistant_reasoning_field`` renames reasoning carried on assistant
+    messages to the wire field an OpenAI-compatible backend expects. Ollama's
+    OpenAI-compatible API reads ``reasoning`` while LiteLLM's canonical
+    client-facing field is ``reasoning_content``, so a per-deployment rename
+    is needed on the way out. The helper must also accept either inbound
+    spelling (clients may send ``reasoning``), leave non-assistant messages
+    alone, and invent nothing when no reasoning is present."""
+
+    def test_default_field_untouched(self):
+        messages = [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "answer", "reasoning_content": "thoughts"},
+        ]
+
+        result = _apply_assistant_reasoning_field(messages, None)
+
+        assert result[1]["reasoning_content"] == "thoughts"
+        assert "reasoning" not in result[1]
+
+    def test_renames_reasoning_content_to_configured_field(self):
+        messages = [
+            {"role": "assistant", "content": "answer", "reasoning_content": "thoughts"},
+        ]
+
+        result = _apply_assistant_reasoning_field(messages, "reasoning")
+
+        assert result[0]["reasoning"] == "thoughts"
+        assert "reasoning_content" not in result[0]
+
+    def test_normalizes_inbound_reasoning_spelling(self):
+        messages = [
+            {"role": "assistant", "content": "answer", "reasoning": "thoughts"},
+        ]
+
+        result = _apply_assistant_reasoning_field(messages, "reasoning")
+
+        assert result[0]["reasoning"] == "thoughts"
+        assert "reasoning_content" not in result[0]
+
+    def test_default_field_normalizes_inbound_reasoning_spelling(self):
+        messages = [
+            {"role": "assistant", "content": "answer", "reasoning": "thoughts"},
+        ]
+
+        result = _apply_assistant_reasoning_field(messages, None)
+
+        assert result[0]["reasoning_content"] == "thoughts"
+        assert "reasoning" not in result[0]
+
+    def test_reasoning_content_target_keeps_existing_spelling(self):
+        messages = [
+            {"role": "assistant", "content": "answer", "reasoning_content": "thoughts"},
+        ]
+
+        result = _apply_assistant_reasoning_field(messages, "reasoning_content")
+
+        assert result[0]["reasoning_content"] == "thoughts"
+        assert "reasoning" not in result[0]
+
+    def test_non_assistant_messages_untouched(self):
+        messages = [
+            {"role": "system", "content": "sys", "reasoning": "stray"},
+            {"role": "user", "content": "hi", "reasoning": "stray"},
+            {"role": "tool", "content": "result", "reasoning": "stray"},
+        ]
+
+        result = _apply_assistant_reasoning_field(messages, "reasoning")
+
+        for message in result:
+            assert message["reasoning"] == "stray"
+
+    def test_no_reasoning_invents_nothing(self):
+        messages = [
+            {"role": "assistant", "content": "answer"},
+        ]
+
+        result = _apply_assistant_reasoning_field(messages, "reasoning")
+
+        assert "reasoning" not in result[0]
+        assert "reasoning_content" not in result[0]
+
+    def test_preserves_other_message_fields(self):
+        messages = [
+            {
+                "role": "assistant",
+                "content": "answer",
+                "reasoning_content": "thoughts",
+                "tool_calls": [{"id": "call_1", "function": {"name": "f", "arguments": "{}"}}],
+            },
+        ]
+
+        result = _apply_assistant_reasoning_field(messages, "reasoning")
+
+        assert result[0]["tool_calls"] == messages[0]["tool_calls"]
+        assert result[0]["content"] == "answer"
+
+    def test_empty_messages(self):
+        assert _apply_assistant_reasoning_field([], "reasoning") == []
+
+    def test_input_not_mutated(self):
+        messages = [
+            {"role": "assistant", "content": "answer", "reasoning_content": "thoughts"},
+        ]
+        snapshot = json.loads(json.dumps(messages))
+
+        _apply_assistant_reasoning_field(messages, "reasoning")
+
+        assert messages == snapshot
+
+    def test_empty_string_reasoning_is_dropped(self):
+        messages = [
+            {"role": "assistant", "content": "answer", "reasoning_content": ""},
+        ]
+
+        result = _apply_assistant_reasoning_field(messages, "reasoning")
+
+        assert "reasoning" not in result[0]
+        assert "reasoning_content" not in result[0]
+
+    def test_multiple_assistant_messages(self):
+        messages = [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "a1", "reasoning_content": "r1"},
+            {"role": "user", "content": "again"},
+            {"role": "assistant", "content": "a2", "reasoning_content": "r2"},
+        ]
+
+        result = _apply_assistant_reasoning_field(messages, "reasoning")
+
+        assert result[1]["reasoning"] == "r1"
+        assert result[3]["reasoning"] == "r2"

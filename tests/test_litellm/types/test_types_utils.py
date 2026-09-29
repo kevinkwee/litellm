@@ -200,9 +200,7 @@ def test_chat_completion_token_logprob_valid_top_logprobs():
         bytes=[72, 101, 108, 108, 111],
         logprob=-0.31725305,
         top_logprobs=[
-            TopLogprob(
-                token="Hello", logprob=-0.31725305, bytes=[72, 101, 108, 108, 111]
-            ),
+            TopLogprob(token="Hello", logprob=-0.31725305, bytes=[72, 101, 108, 108, 111]),
             TopLogprob(token="Hi", logprob=-1.3190403, bytes=[72, 105]),
         ],
     )
@@ -295,9 +293,7 @@ class TestNativeFinishReason:
         )
         assert choice.finish_reason == "length"
         assert choice.provider_specific_fields["native_finish_reason"] == "max_tokens"
-        assert choice.provider_specific_fields["citations"] == [
-            {"url": "http://example.com"}
-        ]
+        assert choice.provider_specific_fields["citations"] == [{"url": "http://example.com"}]
 
     def test_gemini_safety_reason_exposed(self):
         from litellm.types.utils import Choices
@@ -339,9 +335,34 @@ def test_parallel_request_limiter_internal_fields_in_all_litellm_params():
     ]
     for field in internal_fields:
         assert field in all_litellm_params, (
-            f"{field!r} is not in all_litellm_params. "
-            "It will be forwarded to upstream providers and cause 400 errors."
+            f"{field!r} is not in all_litellm_params. It will be forwarded to upstream providers and cause 400 errors."
         )
+
+
+def test_assistant_reasoning_field_in_all_litellm_params():
+    """
+    assistant_reasoning_field is a litellm-level param consumed by request
+    transforms, never by the upstream provider.  If it falls out of
+    all_litellm_params it gets swept into extra_body and OpenAI rejects the
+    request with a 400 invalid_request_error.
+    """
+    from litellm.types.utils import all_litellm_params
+    from litellm.utils import get_non_default_completion_params
+
+    assert "assistant_reasoning_field" in all_litellm_params
+
+    non_default_params = get_non_default_completion_params(
+        {"model": "glm-5.3", "assistant_reasoning_field": "reasoning"}
+    )
+    assert "assistant_reasoning_field" not in non_default_params
+
+
+def test_assistant_reasoning_field_on_generic_litellm_params():
+    """Deployment configs persist litellm_params through GenericLiteLLMParams;
+    the field must be declared so per-deployment values survive the round trip."""
+    from litellm.types.router import GenericLiteLLMParams
+
+    assert "assistant_reasoning_field" in GenericLiteLLMParams.__annotations__
 
 
 def test_delta_maps_reasoning_to_reasoning_content():
@@ -356,9 +377,7 @@ def test_delta_maps_reasoning_to_reasoning_content():
     # When provider sends 'reasoning' (e.g., Cerebras gpt-oss streaming)
     delta = Delta(content=None, role="assistant", reasoning="thinking step by step")
     assert delta.reasoning_content == "thinking step by step"
-    assert not hasattr(
-        delta, "reasoning"
-    ), "reasoning should not leak as an extra attribute"
+    assert not hasattr(delta, "reasoning"), "reasoning should not leak as an extra attribute"
 
     # When provider sends 'reasoning_content' directly (e.g., NIM), it still works
     delta2 = Delta(content="hello", reasoning_content="direct reasoning")
@@ -381,13 +400,9 @@ def test_message_accepts_thinking_block_with_null_signature():
     """
     from litellm.types.utils import Choices, Message
 
-    thinking_blocks = [
-        {"type": "thinking", "thinking": "step by step reasoning", "signature": None}
-    ]
+    thinking_blocks = [{"type": "thinking", "thinking": "step by step reasoning", "signature": None}]
 
-    message = Message(
-        content="the answer is 4", role="assistant", thinking_blocks=thinking_blocks
-    )
+    message = Message(content="the answer is 4", role="assistant", thinking_blocks=thinking_blocks)
     assert message.thinking_blocks is not None
     assert message.thinking_blocks[0]["signature"] is None
     assert message.thinking_blocks[0]["thinking"] == "step by step reasoning"

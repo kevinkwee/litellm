@@ -247,6 +247,16 @@ class GenericLiteLLMParams(CredentialLiteLLMParams, CustomPricingLiteLLMParams):
     )
     model_config = ConfigDict(extra="allow", arbitrary_types_allowed=True)
     merge_reasoning_content_in_choices: Optional[bool] = False
+    assistant_reasoning_field: Optional[str] = Field(
+        default=None,
+        description=(
+            "Field name carrying reasoning on assistant messages sent to the provider. "
+            "Defaults to 'reasoning_content'. Set to 'reasoning' for backends that expect "
+            "the short spelling, e.g. Ollama's OpenAI-compatible API. An unset value "
+            "still normalizes an inbound 'reasoning' key on assistant messages to "
+            "'reasoning_content'."
+        ),
+    )
     model_info: Optional[Dict] = None
     mock_response: Optional[Union[str, ModelResponse, Exception, Any]] = None
 

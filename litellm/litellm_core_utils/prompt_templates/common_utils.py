@@ -1505,6 +1505,41 @@ def _parse_content_for_reasoning(
     return None, message_text
 
 
+_REASONING_MESSAGE_FIELDS = ("reasoning_content", "reasoning")
+_DEFAULT_ASSISTANT_REASONING_FIELD = "reasoning_content"
+
+
+def _apply_assistant_reasoning_field(
+    messages: List[AllMessageValues],
+    assistant_reasoning_field: Optional[str],
+) -> List[AllMessageValues]:
+    """
+    Rename reasoning on assistant messages to the wire field the target
+    backend reads. None keeps the canonical ``reasoning_content``.
+    """
+    target_field = assistant_reasoning_field or _DEFAULT_ASSISTANT_REASONING_FIELD
+    return [
+        _rename_message_reasoning_field(message, target_field) if message.get("role") == "assistant" else message
+        for message in messages
+    ]
+
+
+def _rename_message_reasoning_field(
+    message: AllMessageValues,
+    target_field: str,
+) -> AllMessageValues:
+    if not any(field in message for field in _REASONING_MESSAGE_FIELDS):
+        return message
+    source_field = next(
+        (field for field in _REASONING_MESSAGE_FIELDS if message.get(field)),
+        None,
+    )
+    stripped = {k: v for k, v in message.items() if k not in _REASONING_MESSAGE_FIELDS}
+    if source_field is None:
+        return cast(AllMessageValues, stripped)  # cast-ok: same keys as source message minus reasoning
+    return cast(AllMessageValues, {**stripped, target_field: message[source_field]})  # cast-ok: subset of source keys
+
+
 def _extract_base64_data(image_url: str) -> str:
     """
     Extract pure base64 data from an image URL.

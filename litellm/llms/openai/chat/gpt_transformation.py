@@ -3,6 +3,7 @@ Support for gpt model family
 """
 
 import json
+import os
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -18,8 +19,6 @@ from typing import (
     cast,
     overload,
 )
-
-import os
 from urllib.parse import urlparse
 
 import httpx
@@ -31,7 +30,10 @@ from litellm.litellm_core_utils.llm_response_utils.convert_dict_to_response impo
     _handle_invalid_parallel_tool_calls,
     _should_convert_tool_call_to_json_mode,
 )
-from litellm.litellm_core_utils.prompt_templates.common_utils import get_tool_call_names
+from litellm.litellm_core_utils.prompt_templates.common_utils import (
+    _apply_assistant_reasoning_field,
+    get_tool_call_names,
+)
 from litellm.litellm_core_utils.prompt_templates.image_handling import (
     async_convert_url_to_base64,
     convert_url_to_base64,
@@ -447,6 +449,10 @@ class OpenAIGPTConfig(BaseLLMModelInfo, BaseConfig):
                 optional_params["tools"] = tools
 
         optional_params.pop("max_retries", None)
+        messages = _apply_assistant_reasoning_field(
+            messages=messages,
+            assistant_reasoning_field=litellm_params.get("assistant_reasoning_field"),
+        )
 
         return {
             "model": model,
@@ -477,6 +483,10 @@ class OpenAIGPTConfig(BaseLLMModelInfo, BaseConfig):
             if tools is not None and len(tools) > 0:
                 optional_params["tools"] = tools
         if self.__class__._is_base_class:
+            transformed_messages = _apply_assistant_reasoning_field(
+                messages=transformed_messages,
+                assistant_reasoning_field=litellm_params.get("assistant_reasoning_field"),
+            )
             return {
                 "model": model,
                 "messages": transformed_messages,
