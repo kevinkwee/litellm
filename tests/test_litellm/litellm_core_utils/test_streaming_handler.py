@@ -2,13 +2,12 @@ import json
 import os
 import sys
 import time
+import uuid
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
 
-sys.path.insert(
-    0, os.path.abspath("../../..")
-)  # Adds the parent directory to the system path
+sys.path.insert(0, os.path.abspath("../../.."))  # Adds the parent directory to the system path
 import asyncio
 import traceback
 from typing import Optional
@@ -175,9 +174,7 @@ def test_is_chunk_non_empty_with_annotations(
                 "index": 0,
                 "delta": {
                     "content": None,
-                    "annotations": [
-                        {"type": "url_citation", "url": "https://www.google.com"}
-                    ],
+                    "annotations": [{"type": "url_citation", "url": "https://www.google.com"}],
                 },
                 "logprobs": None,
                 "finish_reason": None,
@@ -251,9 +248,7 @@ def test_optional_combine_thinking_block_in_choices(
 
     # Process first chunk
     first_response = ModelResponseStream(**first_chunk)
-    initialized_custom_stream_wrapper._optional_combine_thinking_block_in_choices(
-        first_response
-    )
+    initialized_custom_stream_wrapper._optional_combine_thinking_block_in_choices(first_response)
     print("first_response", json.dumps(first_response, indent=4, default=str))
     assert first_response.choices[0].delta.content == "<think>Let me think about this"
     # assert the response does not have attribute reasoning_content
@@ -263,18 +258,14 @@ def test_optional_combine_thinking_block_in_choices(
 
     # Process middle chunk
     middle_response = ModelResponseStream(**middle_chunk)
-    initialized_custom_stream_wrapper._optional_combine_thinking_block_in_choices(
-        middle_response
-    )
+    initialized_custom_stream_wrapper._optional_combine_thinking_block_in_choices(middle_response)
     print("middle_response", json.dumps(middle_response, indent=4, default=str))
     assert middle_response.choices[0].delta.content == " step by step"
     assert not hasattr(middle_response.choices[0].delta, "reasoning_content")
 
     # Process final chunk
     final_response = ModelResponseStream(**final_chunk)
-    initialized_custom_stream_wrapper._optional_combine_thinking_block_in_choices(
-        final_response
-    )
+    initialized_custom_stream_wrapper._optional_combine_thinking_block_in_choices(final_response)
     print("final_response", json.dumps(final_response, indent=4, default=str))
     assert final_response.choices[0].delta.content == "</think>The answer is 42"
     assert initialized_custom_stream_wrapper.sent_last_thinking_block is True
@@ -385,19 +376,15 @@ def test_multi_chunk_reasoning_and_content(
     # Process each chunk and verify results
     for i, (chunk, expected_content) in enumerate(zip(chunks, expected_contents)):
         response = ModelResponseStream(**chunk)
-        initialized_custom_stream_wrapper._optional_combine_thinking_block_in_choices(
-            response
-        )
+        initialized_custom_stream_wrapper._optional_combine_thinking_block_in_choices(response)
 
         # Check content
-        assert (
-            response.choices[0].delta.content == expected_content
-        ), f"Chunk {i+1}: content mismatch"
+        assert response.choices[0].delta.content == expected_content, f"Chunk {i + 1}: content mismatch"
 
         # Check reasoning_content was removed
-        assert not hasattr(
-            response.choices[0].delta, "reasoning_content"
-        ), f"Chunk {i+1}: reasoning_content should be removed"
+        assert not hasattr(response.choices[0].delta, "reasoning_content"), (
+            f"Chunk {i + 1}: reasoning_content should be removed"
+        )
 
     # Verify final state
     assert initialized_custom_stream_wrapper.sent_first_thinking_block is True
@@ -408,28 +395,101 @@ def test_strip_sse_data_from_chunk():
     """Test the static method that strips 'data: ' prefix from SSE chunks"""
     # Test with string inputs
     assert CustomStreamWrapper._strip_sse_data_from_chunk("data: content") == "content"
-    assert (
-        CustomStreamWrapper._strip_sse_data_from_chunk("data:  spaced content")
-        == " spaced content"
-    )
-    assert (
-        CustomStreamWrapper._strip_sse_data_from_chunk("regular content")
-        == "regular content"
-    )
-    assert (
-        CustomStreamWrapper._strip_sse_data_from_chunk("regular content with data:")
-        == "regular content with data:"
-    )
+    assert CustomStreamWrapper._strip_sse_data_from_chunk("data:  spaced content") == " spaced content"
+    assert CustomStreamWrapper._strip_sse_data_from_chunk("regular content") == "regular content"
+    assert CustomStreamWrapper._strip_sse_data_from_chunk("regular content with data:") == "regular content with data:"
 
     # Test with None input
     assert CustomStreamWrapper._strip_sse_data_from_chunk(None) is None
 
 
+def _low_entropy_provider_stream_chunks() -> list[ModelResponseStream]:
+    """Stream chunks whose ids collide across concurrent requests in SpendLogs."""
+
+    def _chunk(content: str, finish_reason: Optional[str]) -> ModelResponseStream:
+        return ModelResponseStream(
+            id="chatcmpl-42",
+            created=1702685778,
+            model="gpt-4o-mini",
+            object="chat.completion.chunk",
+            system_fingerprint=None,
+            choices=[
+                StreamingChoices(
+                    finish_reason=finish_reason,
+                    index=0,
+                    delta=Delta(
+                        provider_specific_fields=None,
+                        content=content,
+                        role="assistant",
+                        function_call=None,
+                        tool_calls=None,
+                        audio=None,
+                    ),
+                    logprobs=None,
+                )
+            ],
+            provider_specific_fields={},
+            usage=None,
+        )
+
+    return [
+        _chunk("Hello", None),
+        _chunk(", world", None),
+        _chunk("", "stop"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_streaming_replaces_low_entropy_provider_id_on_every_chunk(
+    logging_obj: Logging,
+):
+    response = CustomStreamWrapper(
+        completion_stream=ModelResponseListIterator(model_responses=_low_entropy_provider_stream_chunks()),
+        model="gpt-4o-mini",
+        custom_llm_provider="openai",
+        logging_obj=logging_obj,
+    )
+
+    chunk_ids = [chunk.id async for chunk in response]
+
+    assert len(chunk_ids) > 0
+    assert len(set(chunk_ids)) == 1
+    replacement_id = chunk_ids[0]
+    assert replacement_id != "chatcmpl-42"
+    uuid.UUID(replacement_id.removeprefix("chatcmpl-"))
+
+
+@pytest.mark.asyncio
+async def test_streaming_low_entropy_replacement_id_is_unique_per_stream(
+    logging_obj: Logging,
+):
+    async def _first_chunk_id(response: CustomStreamWrapper) -> str:
+        chunk_ids = [chunk.id async for chunk in response]
+        assert len(chunk_ids) > 0
+        return chunk_ids[0]
+
+    first = CustomStreamWrapper(
+        completion_stream=ModelResponseListIterator(model_responses=_low_entropy_provider_stream_chunks()),
+        model="gpt-4o-mini",
+        custom_llm_provider="openai",
+        logging_obj=logging_obj,
+    )
+    second = CustomStreamWrapper(
+        completion_stream=ModelResponseListIterator(model_responses=_low_entropy_provider_stream_chunks()),
+        model="gpt-4o-mini",
+        custom_llm_provider="openai",
+        logging_obj=logging_obj,
+    )
+
+    first_id = await _first_chunk_id(first)
+    second_id = await _first_chunk_id(second)
+
+    assert first_id != second_id
+
+
 @pytest.mark.parametrize("sync_mode", [True, False])
 @pytest.mark.asyncio
-async def test_streaming_handler_with_usage(
-    sync_mode: bool, final_usage_block: Optional[Usage] = None
-):
+async def test_streaming_handler_with_usage(sync_mode: bool, final_usage_block: Optional[Usage] = None):
     import time
 
     final_usage_block = final_usage_block or Usage(
@@ -544,32 +604,20 @@ async def test_streaming_with_usage_and_logging(sync_mode: bool):
     with (
         patch.object(mock_callback, "log_success_event") as mock_log_success_event,
         patch.object(mock_callback, "log_stream_event") as mock_log_stream_event,
-        patch.object(
-            mock_callback, "async_log_success_event"
-        ) as mock_async_log_success_event,
-        patch.object(
-            mock_callback, "async_log_stream_event"
-        ) as mock_async_log_stream_event,
+        patch.object(mock_callback, "async_log_success_event") as mock_async_log_success_event,
+        patch.object(mock_callback, "async_log_stream_event") as mock_async_log_stream_event,
     ):
-        await test_streaming_handler_with_usage(
-            sync_mode=sync_mode, final_usage_block=final_usage_block
-        )
+        await test_streaming_handler_with_usage(sync_mode=sync_mode, final_usage_block=final_usage_block)
         if sync_mode:
             time.sleep(1)
             mock_log_success_event.assert_called_once()
             # mock_log_stream_event.assert_called()
-            assert (
-                mock_log_success_event.call_args.kwargs["response_obj"].usage
-                == final_usage_block
-            )
+            assert mock_log_success_event.call_args.kwargs["response_obj"].usage == final_usage_block
         else:
             await asyncio.sleep(1)
             mock_async_log_success_event.assert_called_once()
             # mock_async_log_stream_event.assert_called()
-            assert (
-                mock_async_log_success_event.call_args.kwargs["response_obj"].usage
-                == final_usage_block
-            )
+            assert mock_async_log_success_event.call_args.kwargs["response_obj"].usage == final_usage_block
 
 
 def test_streaming_handler_with_stop_chunk(
@@ -695,17 +743,11 @@ def test_set_response_id_propagation_empty_to_valid(
     """Test that response_id is properly set when first chunk has empty ID and second chunk has valid ID"""
 
     model_response1 = ModelResponseStream(id="", created=1742056047, model=None)
-    model_response1 = initialized_custom_stream_wrapper.set_model_id(
-        model_response1.id, model_response1
-    )
+    model_response1 = initialized_custom_stream_wrapper.set_model_id(model_response1.id, model_response1)
     assert model_response1.id == ""
 
-    model_response2 = ModelResponseStream(
-        id="valid-id-123", created=1742056048, model=None
-    )
-    model_response2 = initialized_custom_stream_wrapper.set_model_id(
-        "valid-id-123", model_response2
-    )
+    model_response2 = ModelResponseStream(id="valid-id-123", created=1742056048, model=None)
+    model_response2 = initialized_custom_stream_wrapper.set_model_id("valid-id-123", model_response2)
     assert model_response2.id == "valid-id-123"
     assert initialized_custom_stream_wrapper.response_id == "valid-id-123"
 
@@ -715,19 +757,13 @@ def test_set_response_id_propagation_valid_to_invalid(
 ):
     """Test that response_id is maintained when first chunk has valid ID and second chunk has invalid ID"""
 
-    model_response1 = ModelResponseStream(
-        id="first-valid-id", created=1742056049, model=None
-    )
-    model_response1 = initialized_custom_stream_wrapper.set_model_id(
-        "first-valid-id", model_response1
-    )
+    model_response1 = ModelResponseStream(id="first-valid-id", created=1742056049, model=None)
+    model_response1 = initialized_custom_stream_wrapper.set_model_id("first-valid-id", model_response1)
     assert model_response1.id == "first-valid-id"
     assert initialized_custom_stream_wrapper.response_id == "first-valid-id"
 
     model_response2 = ModelResponseStream(id="", created=1742056050, model=None)
-    model_response2 = initialized_custom_stream_wrapper.set_model_id(
-        "", model_response2
-    )
+    model_response2 = initialized_custom_stream_wrapper.set_model_id("", model_response2)
     assert model_response2.id == "first-valid-id"
     assert initialized_custom_stream_wrapper.response_id == "first-valid-id"
 
@@ -743,9 +779,7 @@ async def test_streaming_completion_start_time(logging_obj: Logging):
     mock_callback = MockCallback()
     litellm.success_callback = [mock_callback, "langfuse"]
 
-    completion_stream = ModelResponseListIterator(
-        model_responses=bedrock_chunks, delay=0.1
-    )
+    completion_stream = ModelResponseListIterator(model_responses=bedrock_chunks, delay=0.1)
 
     response = CustomStreamWrapper(
         completion_stream=completion_stream,
@@ -759,10 +793,7 @@ async def test_streaming_completion_start_time(logging_obj: Logging):
     await asyncio.sleep(2)
 
     assert logging_obj.model_call_details["completion_start_time"] is not None
-    assert (
-        logging_obj.model_call_details["completion_start_time"]
-        < logging_obj.model_call_details["end_time"]
-    )
+    assert logging_obj.model_call_details["completion_start_time"] < logging_obj.model_call_details["end_time"]
 
 
 @pytest.mark.asyncio
@@ -771,9 +802,7 @@ async def test_vertex_streaming_bad_request_not_midstream(logging_obj: Logging):
     from litellm.llms.vertex_ai.common_utils import VertexAIError
 
     async def _raise_bad_request(**kwargs):
-        raise VertexAIError(
-            status_code=400, message="invalid maxOutputTokens", headers=None
-        )
+        raise VertexAIError(status_code=400, message="invalid maxOutputTokens", headers=None)
 
     response = CustomStreamWrapper(
         completion_stream=None,
@@ -802,9 +831,7 @@ async def test_vertex_streaming_rate_limit_triggers_midstream_fallback(
     from litellm.llms.vertex_ai.common_utils import VertexAIError
 
     async def _raise_rate_limit(**kwargs):
-        raise VertexAIError(
-            status_code=429, message="Resource exhausted.", headers=None
-        )
+        raise VertexAIError(status_code=429, message="Resource exhausted.", headers=None)
 
     response = CustomStreamWrapper(
         completion_stream=None,
@@ -832,9 +859,7 @@ def test_sync_streaming_rate_limit_triggers_midstream_fallback(logging_obj: Logg
     from litellm.llms.vertex_ai.common_utils import VertexAIError
 
     def _raise_rate_limit(**kwargs):
-        raise VertexAIError(
-            status_code=429, message="Resource exhausted.", headers=None
-        )
+        raise VertexAIError(status_code=429, message="Resource exhausted.", headers=None)
 
     response = CustomStreamWrapper(
         completion_stream=None,
@@ -859,9 +884,7 @@ def test_sync_streaming_bad_request_not_midstream(logging_obj: Logging):
     from litellm.llms.vertex_ai.common_utils import VertexAIError
 
     def _raise_bad_request(**kwargs):
-        raise VertexAIError(
-            status_code=400, message="invalid maxOutputTokens", headers=None
-        )
+        raise VertexAIError(status_code=400, message="invalid maxOutputTokens", headers=None)
 
     response = CustomStreamWrapper(
         completion_stream=None,
@@ -914,9 +937,7 @@ async def test_bedrock_midstream_internal_server_error_wraps_for_fallback(
     decoder = AWSEventStreamDecoder(model="anthropic.claude-3-sonnet-20240229-v1:0")
 
     async def _bedrock_stream():
-        decoder._parse_message_from_event(
-            _bedrock_error_event("internalServerException")
-        )
+        decoder._parse_message_from_event(_bedrock_error_event("internalServerException"))
         yield  # unreachable; the line above raises
 
     async def _make_call(**kwargs):
@@ -998,9 +1019,7 @@ def _hosted_vllm_stream_wrapper(logging_obj: Logging, error_payload: dict) -> Cu
         yield f"data: {json.dumps(error_payload)}"
         yield "data: [DONE]"
 
-    completion_stream = OpenAIChatCompletionStreamingHandler(
-        streaming_response=_stream(), sync_stream=False
-    )
+    completion_stream = OpenAIChatCompletionStreamingHandler(streaming_response=_stream(), sync_stream=False)
     return CustomStreamWrapper(
         completion_stream=completion_stream,
         model="qwen-vl",
@@ -1105,13 +1124,9 @@ def test_streaming_handler_with_created_time_propagation(
     """Test that the created time is consistent across chunks"""
     import time
 
-    bad_chunk = ModelResponseStream(
-        choices=[], created=int(time.time())
-    )  # chunk with different created time
+    bad_chunk = ModelResponseStream(choices=[], created=int(time.time()))  # chunk with different created time
 
-    completion_stream = ModelResponseListIterator(
-        model_responses=bedrock_chunks + [bad_chunk]
-    )
+    completion_stream = ModelResponseListIterator(model_responses=bedrock_chunks + [bad_chunk])
 
     response = CustomStreamWrapper(
         completion_stream=completion_stream,
@@ -1198,29 +1213,20 @@ def test_optional_combine_thinking_block_with_none_content(
 
     # Process first chunk - should not raise TypeError
     first_response = ModelResponseStream(**first_chunk)
-    initialized_custom_stream_wrapper._optional_combine_thinking_block_in_choices(
-        first_response
-    )
-    assert (
-        first_response.choices[0].delta.content
-        == "<think>Let me think about this problem"
-    )
+    initialized_custom_stream_wrapper._optional_combine_thinking_block_in_choices(first_response)
+    assert first_response.choices[0].delta.content == "<think>Let me think about this problem"
     assert not hasattr(first_response.choices[0].delta, "reasoning_content")
     assert initialized_custom_stream_wrapper.sent_first_thinking_block is True
 
     # Process second chunk - should work with continued reasoning
     second_response = ModelResponseStream(**second_chunk)
-    initialized_custom_stream_wrapper._optional_combine_thinking_block_in_choices(
-        second_response
-    )
+    initialized_custom_stream_wrapper._optional_combine_thinking_block_in_choices(second_response)
     assert second_response.choices[0].delta.content == " step by step"
     assert not hasattr(second_response.choices[0].delta, "reasoning_content")
 
     # Process final chunk - should add </think> tag
     final_response = ModelResponseStream(**final_chunk)
-    initialized_custom_stream_wrapper._optional_combine_thinking_block_in_choices(
-        final_response
-    )
+    initialized_custom_stream_wrapper._optional_combine_thinking_block_in_choices(final_response)
     assert final_response.choices[0].delta.content == "</think>The answer is 42"
     assert initialized_custom_stream_wrapper.sent_last_thinking_block is True
     assert not hasattr(final_response.choices[0].delta, "reasoning_content")
@@ -1232,12 +1238,8 @@ def test_has_special_delta_content(
     """Test the _has_special_delta_content helper method"""
 
     # Test empty choices
-    empty_response = ModelResponseStream(
-        id="test", created=1742056047, model=None, choices=[]
-    )
-    assert not initialized_custom_stream_wrapper._has_special_delta_content(
-        empty_response
-    )
+    empty_response = ModelResponseStream(id="test", created=1742056047, model=None, choices=[])
+    assert not initialized_custom_stream_wrapper._has_special_delta_content(empty_response)
 
     # Test with tool_calls (simulate with mock object)
     tool_call_response = ModelResponseStream(
@@ -1260,9 +1262,7 @@ def test_has_special_delta_content(
             )
         ],
     )
-    assert initialized_custom_stream_wrapper._has_special_delta_content(
-        tool_call_response
-    )
+    assert initialized_custom_stream_wrapper._has_special_delta_content(tool_call_response)
 
     # Test with function_call (simulate with mock object)
     function_call_response = ModelResponseStream(
@@ -1273,24 +1273,18 @@ def test_has_special_delta_content(
             StreamingChoices(
                 finish_reason=None,
                 index=0,
-                delta=Delta(
-                    content=None, function_call={"name": "test_func", "arguments": "{}"}
-                ),
+                delta=Delta(content=None, function_call={"name": "test_func", "arguments": "{}"}),
             )
         ],
     )
-    assert initialized_custom_stream_wrapper._has_special_delta_content(
-        function_call_response
-    )
+    assert initialized_custom_stream_wrapper._has_special_delta_content(function_call_response)
 
     # Test with audio (simulate by adding audio attribute)
     audio_response = ModelResponseStream(
         id="test",
         created=1742056047,
         model=None,
-        choices=[
-            StreamingChoices(finish_reason=None, index=0, delta=Delta(content=None))
-        ],
+        choices=[StreamingChoices(finish_reason=None, index=0, delta=Delta(content=None))],
     )
     # Manually add audio attribute to delta
     audio_response.choices[0].delta.audio = {"transcript": "test"}
@@ -1301,9 +1295,7 @@ def test_has_special_delta_content(
         id="test",
         created=1742056047,
         model=None,
-        choices=[
-            StreamingChoices(finish_reason=None, index=0, delta=Delta(content=None))
-        ],
+        choices=[StreamingChoices(finish_reason=None, index=0, delta=Delta(content=None))],
     )
     # Manually add image attribute to delta
     image_response.choices[0].delta.images = [{"url": "test.jpg"}]
@@ -1314,15 +1306,9 @@ def test_has_special_delta_content(
         id="test",
         created=1742056047,
         model=None,
-        choices=[
-            StreamingChoices(
-                finish_reason=None, index=0, delta=Delta(content="Hello world")
-            )
-        ],
+        choices=[StreamingChoices(finish_reason=None, index=0, delta=Delta(content="Hello world"))],
     )
-    assert not initialized_custom_stream_wrapper._has_special_delta_content(
-        regular_response
-    )
+    assert not initialized_custom_stream_wrapper._has_special_delta_content(regular_response)
 
 
 def test_handle_special_delta_content(
@@ -1343,9 +1329,7 @@ def test_handle_special_delta_content(
     )
 
     # The method should call strip_role_from_delta
-    result = initialized_custom_stream_wrapper._handle_special_delta_content(
-        test_response
-    )
+    result = initialized_custom_stream_wrapper._handle_special_delta_content(test_response)
 
     # Should return the same response object (modified)
     assert result is test_response
@@ -1365,9 +1349,7 @@ def test_has_any_special_delta_attributes(
             self.audio = {"transcript": "Hello world"}
 
     audio_delta = MockDelta()
-    result = initialized_custom_stream_wrapper._has_any_special_delta_attributes(
-        audio_delta
-    )
+    result = initialized_custom_stream_wrapper._has_any_special_delta_attributes(audio_delta)
     assert result is True
 
     # Test with delta that has image attribute
@@ -1376,9 +1358,7 @@ def test_has_any_special_delta_attributes(
             self.images = [{"url": "test.jpg"}]
 
     image_delta = MockDeltaImage()
-    result = initialized_custom_stream_wrapper._has_any_special_delta_attributes(
-        image_delta
-    )
+    result = initialized_custom_stream_wrapper._has_any_special_delta_attributes(image_delta)
     assert result is True
 
     # Test with delta that has no special attributes
@@ -1387,9 +1367,7 @@ def test_has_any_special_delta_attributes(
             self.content = "regular content"
 
     regular_delta = MockDeltaRegular()
-    result = initialized_custom_stream_wrapper._has_any_special_delta_attributes(
-        regular_delta
-    )
+    result = initialized_custom_stream_wrapper._has_any_special_delta_attributes(regular_delta)
     assert result is False
 
 
@@ -1403,9 +1381,7 @@ def test_handle_special_delta_attributes(
         id="test",
         created=1742056047,
         model=None,
-        choices=[
-            StreamingChoices(finish_reason=None, index=0, delta=Delta(content="test"))
-        ],
+        choices=[StreamingChoices(finish_reason=None, index=0, delta=Delta(content="test"))],
     )
 
     # Test with delta that has audio attribute
@@ -1414,9 +1390,7 @@ def test_handle_special_delta_attributes(
             self.audio = {"transcript": "Hello world"}
 
     audio_delta = MockDelta()
-    initialized_custom_stream_wrapper._handle_special_delta_attributes(
-        audio_delta, model_response
-    )
+    initialized_custom_stream_wrapper._handle_special_delta_attributes(audio_delta, model_response)
 
     # Should copy the audio attribute
     assert hasattr(model_response.choices[0].delta, "audio")
@@ -1432,14 +1406,10 @@ def test_handle_special_delta_attributes(
         id="test",
         created=1742056047,
         model=None,
-        choices=[
-            StreamingChoices(finish_reason=None, index=0, delta=Delta(content="test"))
-        ],
+        choices=[StreamingChoices(finish_reason=None, index=0, delta=Delta(content="test"))],
     )
 
-    initialized_custom_stream_wrapper._handle_special_delta_attributes(
-        image_delta, model_response2
-    )
+    initialized_custom_stream_wrapper._handle_special_delta_attributes(image_delta, model_response2)
 
     # Should copy the image attribute
     print(f"delta: {model_response2.choices[0].delta}")
@@ -1454,9 +1424,7 @@ def test_has_special_delta_attribute(
     """Test the _has_special_delta_attribute helper method"""
 
     # Test with None delta
-    assert not initialized_custom_stream_wrapper._has_special_delta_attribute(
-        None, "audio"
-    )
+    assert not initialized_custom_stream_wrapper._has_special_delta_attribute(None, "audio")
 
     # Test with delta that has the attribute
     class MockDelta:
@@ -1464,9 +1432,7 @@ def test_has_special_delta_attribute(
             self.audio = {"transcript": "test"}
 
     delta_with_audio = MockDelta()
-    assert initialized_custom_stream_wrapper._has_special_delta_attribute(
-        delta_with_audio, "audio"
-    )
+    assert initialized_custom_stream_wrapper._has_special_delta_attribute(delta_with_audio, "audio")
 
     # Test with delta that doesn't have the attribute
     class MockDeltaNoAudio:
@@ -1474,9 +1440,7 @@ def test_has_special_delta_attribute(
             self.content = "test"
 
     delta_without_audio = MockDeltaNoAudio()
-    assert not initialized_custom_stream_wrapper._has_special_delta_attribute(
-        delta_without_audio, "audio"
-    )
+    assert not initialized_custom_stream_wrapper._has_special_delta_attribute(delta_without_audio, "audio")
 
     # Test with delta that has the attribute but it's None
     class MockDeltaNone:
@@ -1484,9 +1448,7 @@ def test_has_special_delta_attribute(
             self.audio = None
 
     delta_with_none = MockDeltaNone()
-    assert not initialized_custom_stream_wrapper._has_special_delta_attribute(
-        delta_with_none, "audio"
-    )
+    assert not initialized_custom_stream_wrapper._has_special_delta_attribute(delta_with_none, "audio")
 
 
 def test_is_chunk_non_empty_with_empty_tool_calls(
@@ -1654,12 +1616,7 @@ _REPETITION_TEST_CASES = [
     pytest.param(
         ["same"] * (litellm.REPEATED_STREAMING_CHUNK_LIMIT // 2 + 1)
         + ["different_mid"]
-        + ["same"]
-        * (
-            litellm.REPEATED_STREAMING_CHUNK_LIMIT
-            - litellm.REPEATED_STREAMING_CHUNK_LIMIT // 2
-            + 1
-        ),
+        + ["same"] * (litellm.REPEATED_STREAMING_CHUNK_LIMIT - litellm.REPEATED_STREAMING_CHUNK_LIMIT // 2 + 1),
         False,
         id="middle_chunk_different_no_raise",
     ),
@@ -1818,12 +1775,12 @@ def test_usage_chunk_after_finish_reason_updates_hidden_params(logging_obj):
     last_chunk = collected[-1]
     hidden_usage = last_chunk._hidden_params.get("usage")
     assert hidden_usage is not None, "Expected usage in _hidden_params"
-    assert (
-        hidden_usage.prompt_tokens == 20
-    ), f"Expected prompt_tokens=20 from provider, got {hidden_usage.prompt_tokens}"
-    assert (
-        hidden_usage.completion_tokens == 135
-    ), f"Expected completion_tokens=135 from provider, got {hidden_usage.completion_tokens}"
+    assert hidden_usage.prompt_tokens == 20, (
+        f"Expected prompt_tokens=20 from provider, got {hidden_usage.prompt_tokens}"
+    )
+    assert hidden_usage.completion_tokens == 135, (
+        f"Expected completion_tokens=135 from provider, got {hidden_usage.completion_tokens}"
+    )
 
 
 @pytest.mark.asyncio
@@ -1898,9 +1855,7 @@ def test_content_not_dropped_when_finish_reason_already_set(
 
     result = initialized_custom_stream_wrapper.chunk_creator(chunk=content_chunk)
 
-    assert (
-        result is not None
-    ), "chunk_creator() returned None — content was dropped (issue #22098)"
+    assert result is not None, "chunk_creator() returned None — content was dropped (issue #22098)"
     assert result.choices[0].delta.content == "world!"
 
 
@@ -1952,14 +1907,10 @@ def test_tool_use_not_dropped_when_finish_reason_already_set(
 
     result = initialized_custom_stream_wrapper.chunk_creator(chunk=tool_chunk)
 
-    assert (
-        result is not None
-    ), "chunk_creator() returned None — tool_use data was dropped"
+    assert result is not None, "chunk_creator() returned None — tool_use data was dropped"
 
     tool_calls = result.choices[0].delta.tool_calls
-    assert (
-        tool_calls is not None and len(tool_calls) > 0
-    ), "tool_calls should contain at least one tool call"
+    assert tool_calls is not None and len(tool_calls) > 0, "tool_calls should contain at least one tool call"
     assert tool_calls[0].id == "call_1"
     assert tool_calls[0].function.name == "get_weather"
 
@@ -2015,9 +1966,7 @@ def test_dispatch_vllm_extracts_output_text(
     class _VLLMChunk:
         outputs = [_Output()]
 
-    result, _, completion_obj = _run_dispatch(
-        initialized_custom_stream_wrapper, [_VLLMChunk()]
-    )
+    result, _, completion_obj = _run_dispatch(initialized_custom_stream_wrapper, [_VLLMChunk()])
 
     assert isinstance(result, _ProviderChunkParsed)
     assert completion_obj["content"] == "hello from vllm"
@@ -2031,9 +1980,7 @@ def test_dispatch_petals_slices_completion_stream(
     initialized_custom_stream_wrapper.custom_llm_provider = "petals"
     initialized_custom_stream_wrapper.completion_stream = "A" * 50
 
-    result, _, completion_obj = _run_dispatch(
-        initialized_custom_stream_wrapper, chunk=None
-    )
+    result, _, completion_obj = _run_dispatch(initialized_custom_stream_wrapper, chunk=None)
 
     assert isinstance(result, _ProviderChunkParsed)
     assert completion_obj["content"] == "A" * 30
@@ -2048,9 +1995,7 @@ def test_dispatch_petals_empty_stream_sets_stop(
     initialized_custom_stream_wrapper.custom_llm_provider = "petals"
     initialized_custom_stream_wrapper.completion_stream = ""
 
-    result, _, completion_obj = _run_dispatch(
-        initialized_custom_stream_wrapper, chunk=None
-    )
+    result, _, completion_obj = _run_dispatch(initialized_custom_stream_wrapper, chunk=None)
 
     assert isinstance(result, _ProviderChunkParsed)
     assert completion_obj["content"] == ""
@@ -2076,9 +2021,7 @@ def test_dispatch_palm_slices_completion_stream(
     initialized_custom_stream_wrapper.custom_llm_provider = "palm"
     initialized_custom_stream_wrapper.completion_stream = "B" * 40
 
-    result, _, completion_obj = _run_dispatch(
-        initialized_custom_stream_wrapper, chunk=None
-    )
+    result, _, completion_obj = _run_dispatch(initialized_custom_stream_wrapper, chunk=None)
 
     assert isinstance(result, _ProviderChunkParsed)
     assert completion_obj["content"] == "B" * 30
@@ -2102,9 +2045,7 @@ def test_dispatch_cached_response_extracts_delta(
         ],
     )
 
-    result, model_response, completion_obj = _run_dispatch(
-        initialized_custom_stream_wrapper, chunk
-    )
+    result, model_response, completion_obj = _run_dispatch(initialized_custom_stream_wrapper, chunk)
 
     assert isinstance(result, _ProviderChunkParsed)
     assert completion_obj["content"] == "cached text"
@@ -2130,9 +2071,7 @@ def test_dispatch_vertex_ai_legacy_text_and_finish_reason(
         candidates = [_Candidate()]
         text = "vertex content"
 
-    result, _, completion_obj = _run_dispatch(
-        initialized_custom_stream_wrapper, _VertexChunk()
-    )
+    result, _, completion_obj = _run_dispatch(initialized_custom_stream_wrapper, _VertexChunk())
 
     assert isinstance(result, _ProviderChunkParsed)
     assert completion_obj["content"] == "vertex content"
@@ -2149,9 +2088,7 @@ def test_dispatch_vertex_ai_legacy_without_candidates_stringifies_chunk(
         def __str__(self) -> str:
             return "raw vertex blob"
 
-    result, _, completion_obj = _run_dispatch(
-        initialized_custom_stream_wrapper, _RawChunk()
-    )
+    result, _, completion_obj = _run_dispatch(initialized_custom_stream_wrapper, _RawChunk())
 
     assert isinstance(result, _ProviderChunkParsed)
     assert completion_obj["content"] == "raw vertex blob"
@@ -2188,9 +2125,7 @@ def test_dispatch_vertex_ai_legacy_function_call(
         def text(self):
             raise RuntimeError("Part has no text.")
 
-    result, _, _ = _run_dispatch(
-        initialized_custom_stream_wrapper, _VertexFunctionChunk()
-    )
+    result, _, _ = _run_dispatch(initialized_custom_stream_wrapper, _VertexFunctionChunk())
 
     assert isinstance(result, _ProviderChunkParsed)
     tool_calls = result.response_obj["original_chunk"].choices[0].delta.tool_calls
@@ -2207,11 +2142,7 @@ def test_dispatch_custom_provider_returns_chunk_early(
     straight through as an early return rather than re-parsing it."""
     monkeypatch.setattr(litellm, "_custom_providers", ["my-custom-llm"])
     initialized_custom_stream_wrapper.custom_llm_provider = "my-custom-llm"
-    chunk = ModelResponseStream(
-        choices=[
-            StreamingChoices(index=0, delta=Delta(content="hi"), finish_reason=None)
-        ]
-    )
+    chunk = ModelResponseStream(choices=[StreamingChoices(index=0, delta=Delta(content="hi"), finish_reason=None)])
 
     result, _, _ = _run_dispatch(initialized_custom_stream_wrapper, chunk)
 
@@ -2227,11 +2158,7 @@ def test_dispatch_custom_provider_finish_only_returns_none_early(
     records the reason and returns None so no empty delta is emitted."""
     monkeypatch.setattr(litellm, "_custom_providers", ["my-custom-llm"])
     initialized_custom_stream_wrapper.custom_llm_provider = "my-custom-llm"
-    chunk = ModelResponseStream(
-        choices=[
-            StreamingChoices(index=0, delta=Delta(content=None), finish_reason="stop")
-        ]
-    )
+    chunk = ModelResponseStream(choices=[StreamingChoices(index=0, delta=Delta(content=None), finish_reason="stop")])
 
     result, _, _ = _run_dispatch(initialized_custom_stream_wrapper, chunk)
 
@@ -2246,9 +2173,7 @@ def test_dispatch_text_completion_codestral_parses_chunk(
     """text-completion-codestral streams raw SSE JSON strings that the dispatch
     routes through CodestralTextCompletionConfig to extract content/finish."""
     initialized_custom_stream_wrapper.custom_llm_provider = "text-completion-codestral"
-    chunk = json.dumps(
-        {"choices": [{"delta": {"content": "codestral text"}, "finish_reason": "stop"}]}
-    )
+    chunk = json.dumps({"choices": [{"delta": {"content": "codestral text"}, "finish_reason": "stop"}]})
 
     result, _, completion_obj = _run_dispatch(initialized_custom_stream_wrapper, chunk)
 
@@ -2287,9 +2212,7 @@ def test_dispatch_ai21_decodes_completion(
 ):
     """ai21 does fake streaming over a single byte-encoded JSON completion."""
     initialized_custom_stream_wrapper.custom_llm_provider = "ai21"
-    chunk = json.dumps({"completions": [{"data": {"text": "ai21 text"}}]}).encode(
-        "utf-8"
-    )
+    chunk = json.dumps({"completions": [{"data": {"text": "ai21 text"}}]}).encode("utf-8")
 
     result, _, completion_obj = _run_dispatch(initialized_custom_stream_wrapper, chunk)
 
@@ -2318,9 +2241,7 @@ def test_dispatch_text_completion_openai_with_usage(
         choices = [_Choice()]
         usage = _Usage()
 
-    result, model_response, completion_obj = _run_dispatch(
-        initialized_custom_stream_wrapper, _TextChunk()
-    )
+    result, model_response, completion_obj = _run_dispatch(initialized_custom_stream_wrapper, _TextChunk())
 
     assert isinstance(result, _ProviderChunkParsed)
     assert completion_obj["content"] == "oai text"
@@ -2571,9 +2492,7 @@ async def test_azure_streaming_role_preserved_with_include_usage(sync_mode: bool
     - sent_first_chunk is only marked for chunks with real choices
     - Chunks with role in delta are not discarded as empty
     """
-    completion_stream = ModelResponseListIterator(
-        model_responses=_AZURE_CHUNKS_WITH_PROMPT_FILTER
-    )
+    completion_stream = ModelResponseListIterator(model_responses=_AZURE_CHUNKS_WITH_PROMPT_FILTER)
 
     response = CustomStreamWrapper(
         completion_stream=completion_stream,
@@ -2600,19 +2519,14 @@ async def test_azure_streaming_role_preserved_with_include_usage(sync_mode: bool
             chunks.append(chunk)
 
     # The prompt_filter chunk should be forwarded with choices=[]
-    assert (
-        len(chunks[0].choices) == 0
-    ), f"Expected prompt_filter chunk with choices=[], got {len(chunks[0].choices)} choices"
+    assert len(chunks[0].choices) == 0, (
+        f"Expected prompt_filter chunk with choices=[], got {len(chunks[0].choices)} choices"
+    )
 
     # At least one chunk must have role='assistant' in its delta
-    has_role = any(
-        len(c.choices) > 0 and getattr(c.choices[0].delta, "role", None) == "assistant"
-        for c in chunks
-    )
-    assert has_role, (
-        "No chunk contained role='assistant' in delta (issue #24221). "
-        "Chunk deltas: "
-        + str([c.choices[0].delta if c.choices else "no choices" for c in chunks])
+    has_role = any(len(c.choices) > 0 and getattr(c.choices[0].delta, "role", None) == "assistant" for c in chunks)
+    assert has_role, "No chunk contained role='assistant' in delta (issue #24221). Chunk deltas: " + str(
+        [c.choices[0].delta if c.choices else "no choices" for c in chunks]
     )
 
 
@@ -2686,9 +2600,7 @@ def test_gemini_legacy_vertex_tool_calls_finish_reason_with_stop_enum():
     )
 
 
-@pytest.mark.parametrize(
-    "finish_reason", ["stop", "tool_calls", "length", "content_filter"]
-)
+@pytest.mark.parametrize("finish_reason", ["stop", "tool_calls", "length", "content_filter"])
 def test_chunk_creator_passes_through_model_response_stream(
     initialized_custom_stream_wrapper: CustomStreamWrapper,
     finish_reason: str,
@@ -2805,9 +2717,9 @@ def test_chunk_creator_strips_finish_reason_from_content_chunk(
     litellm._custom_providers.remove("my-custom-provider")
 
     assert result is not None
-    assert (
-        result.choices[0].finish_reason is None
-    ), "finish_reason must be stripped from content chunks to avoid double terminal chunks"
+    assert result.choices[0].finish_reason is None, (
+        "finish_reason must be stripped from content chunks to avoid double terminal chunks"
+    )
     assert initialized_custom_stream_wrapper.received_finish_reason == "stop"
 
 
@@ -2834,9 +2746,7 @@ def test_chunk_creator_tool_calls_not_dropped_on_finish(
                     tool_calls=[
                         ChatCompletionDeltaToolCall(
                             id="call_abc",
-                            function=Function(
-                                name="get_weather", arguments='{"city":"NYC"}'
-                            ),
+                            function=Function(name="get_weather", arguments='{"city":"NYC"}'),
                             type="function",
                             index=0,
                         )
@@ -2889,9 +2799,7 @@ def test_record_partial_usage_for_failure_stashes_usage_and_cost():
                 StreamingChoices(
                     finish_reason=None,
                     index=0,
-                    delta=Delta(
-                        content="The Roman Empire began when", role="assistant"
-                    ),
+                    delta=Delta(content="The Roman Empire began when", role="assistant"),
                 )
             ],
             usage=Usage(prompt_tokens=30, completion_tokens=1, total_tokens=31),
@@ -2943,9 +2851,7 @@ async def test_stream_chunk_builder_raise_at_end_of_stream_still_recovers_usage(
     before the fix it escaped __next__/__anext__ and the request was dropped from
     SpendLogs while the provider billed the tokens. The wrapper must catch it and
     recover usage from the raw chunks so cost is still tracked."""
-    final_usage_block = Usage(
-        completion_tokens=392, prompt_tokens=1799, total_tokens=2191
-    )
+    final_usage_block = Usage(completion_tokens=392, prompt_tokens=1799, total_tokens=2191)
     final_chunk = ModelResponseStream(
         id="chatcmpl-raise-test",
         created=1742056047,
@@ -2996,9 +2902,9 @@ async def test_stream_chunk_builder_raise_at_end_of_stream_still_recovers_usage(
                 if getattr(chunk, "usage", None) is not None:
                     seen_usage.append(chunk.usage)
 
-    assert any(
-        u.total_tokens == final_usage_block.total_tokens for u in seen_usage
-    ), "usage recovered from raw chunks was not emitted after stream_chunk_builder raised"
+    assert any(u.total_tokens == final_usage_block.total_tokens for u in seen_usage), (
+        "usage recovered from raw chunks was not emitted after stream_chunk_builder raised"
+    )
 
 
 @pytest.mark.parametrize("sync_mode", [True, False])
@@ -3027,9 +2933,7 @@ async def test_stream_chunk_builder_raise_and_usage_recovery_failure_does_not_cr
     )
 
     response = CustomStreamWrapper(
-        completion_stream=ModelResponseListIterator(
-            model_responses=bedrock_chunks + [final_chunk]
-        ),
+        completion_stream=ModelResponseListIterator(model_responses=bedrock_chunks + [final_chunk]),
         model="bedrock/claude-haiku-4-5-20251001-v1:0",
         custom_llm_provider="bedrock",
         logging_obj=Logging(
@@ -3045,12 +2949,8 @@ async def test_stream_chunk_builder_raise_and_usage_recovery_failure_does_not_cr
     )
 
     with (
-        patch.object(
-            litellm, "stream_chunk_builder", side_effect=Exception("assembly failed")
-        ),
-        patch.object(
-            sh_module, "calculate_total_usage", side_effect=Exception("recovery failed")
-        ),
+        patch.object(litellm, "stream_chunk_builder", side_effect=Exception("assembly failed")),
+        patch.object(sh_module, "calculate_total_usage", side_effect=Exception("recovery failed")),
     ):
         # must not raise even though both assembly and recovery fail
         if sync_mode:

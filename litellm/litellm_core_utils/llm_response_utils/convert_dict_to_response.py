@@ -31,6 +31,7 @@ from litellm.types.utils import (
 )
 from litellm.types.utils import Logprobs as TextCompletionLogprobs
 from litellm.types.utils import (
+    _generate_id,
     Message,
     ModelResponse,
     ModelResponseStream,
@@ -43,6 +44,7 @@ from litellm.types.utils import (
     TranscriptionUsageDurationObject,
     TranscriptionUsageTokensObject,
     Usage,
+    is_low_entropy_response_id,
 )
 
 from .get_headers import get_response_headers
@@ -730,9 +732,12 @@ def convert_to_model_response_object(
                 model_response_object.created = _safe_convert_created_field(response_object["created"])
 
             if "id" in response_object:
-                # Preserve the auto-generated id from ModelResponse.__init__
-                # when the provider returns a falsy id (None, "")
-                model_response_object.id = response_object["id"] or model_response_object.id
+                if is_low_entropy_response_id(response_object["id"]):
+                    model_response_object.id = _generate_id()
+                else:
+                    # Preserve the auto-generated id from ModelResponse.__init__
+                    # when the provider returns a falsy id (None, "")
+                    model_response_object.id = response_object["id"] or model_response_object.id
 
             if "system_fingerprint" in response_object:
                 model_response_object.system_fingerprint = response_object["system_fingerprint"]

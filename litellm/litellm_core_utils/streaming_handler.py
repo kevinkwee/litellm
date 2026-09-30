@@ -41,6 +41,8 @@ from litellm.types.utils import (
     ModelResponseStream,
     StreamingChoices,
     Usage,
+    _generate_id,
+    is_low_entropy_response_id,
 )
 from litellm.types.utils import GenericStreamingChunk as GChunk
 
@@ -170,6 +172,7 @@ class CustomStreamWrapper:
 
         self._response_headers = _response_headers
         self.response_id: Optional[str] = None
+        self.low_entropy_response_id_replacement: Optional[str] = None
         self.logging_loop = None
         self.rules = Rules()
         self.stream_options = stream_options or getattr(logging_obj, "stream_options", None)
@@ -1309,8 +1312,8 @@ class CustomStreamWrapper:
                 completion_obj["tool_calls"] = response_obj["tool_calls"]
             print_verbose(f"completion obj content: {completion_obj['content']}")
             if hasattr(chunk, "id"):
-                model_response.id = chunk.id
-                self.response_id = chunk.id
+                self.response_id = self._response_id_for_stream_chunk(chunk.id)
+                model_response.id = self.response_id
             if hasattr(chunk, "system_fingerprint"):
                 self.system_fingerprint = chunk.system_fingerprint
             if response_obj["is_finished"]:
@@ -1370,9 +1373,16 @@ class CustomStreamWrapper:
                     )
         return _ProviderChunkParsed(response_obj)
 
+    def _response_id_for_stream_chunk(self, chunk_id: Optional[str]) -> Optional[str]:
+        if not is_low_entropy_response_id(chunk_id):
+            return chunk_id
+        if self.low_entropy_response_id_replacement is None:
+            self.low_entropy_response_id_replacement = _generate_id()
+        return self.low_entropy_response_id_replacement
+
     def chunk_creator(self, chunk: Any):  # type: ignore
         if hasattr(chunk, "id"):
-            self.response_id = chunk.id
+            self.response_id = self._response_id_for_stream_chunk(chunk.id)
         model_response = self.model_response_creator()
         response_obj: dict[str, Any] = {}
         try:

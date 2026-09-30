@@ -1,4 +1,5 @@
 import json
+import re
 import time
 from enum import Enum
 from typing import (
@@ -85,6 +86,20 @@ else:
 
 def _generate_id():  # private helper function
     return "chatcmpl-" + str(uuid.uuid4())
+
+
+_LOW_ENTROPY_RESPONSE_ID_PATTERN = re.compile(r"^chatcmpl-\d+$")
+
+
+def is_low_entropy_response_id(response_id: object) -> bool:
+    """True when a provider response id is chatcmpl- followed only by digits.
+
+    Ollama's OpenAI-compatible endpoint returns chatcmpl-<0-998>, so concurrent
+    requests collide and SpendLogs drops rows whose request_id already exists.
+    Callers replace these ids with a generated one. OpenAI and Azure ids carry
+    a long alphanumeric suffix, so they never match.
+    """
+    return isinstance(response_id, str) and _LOW_ENTROPY_RESPONSE_ID_PATTERN.match(response_id) is not None
 
 
 class SafeAttributeModel:
