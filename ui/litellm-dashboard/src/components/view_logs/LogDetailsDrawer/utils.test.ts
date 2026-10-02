@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { sortSessionLogs } from "./utils";
+import { formatCompactTokens, sortSessionLogs } from "./utils";
 
 const log = (id: string, startTime: string, endTime: string, request_duration_ms?: number) => ({
   request_id: id,
@@ -40,5 +40,21 @@ describe("sortSessionLogs", () => {
     const input = [...rows];
     sortSessionLogs(input, "duration");
     expect(ids(input)).toEqual(ids(rows));
+  });
+});
+
+describe("formatCompactTokens", () => {
+  it.each([
+    [0, "0"],
+    [999, "999"],
+    [1000, "1k"],
+    [156201, "156.2k"],
+    [999_995, "1M"],
+    [999_999, "1M"],
+    [999_999_999, "1B"],
+    [1_234_567, "1.23M"],
+    [2_500_000_000, "2.5B"],
+  ])("formats %i as %s", (input, expected) => {
+    expect(formatCompactTokens(input)).toBe(expected);
   });
 });

@@ -5,6 +5,23 @@
 
 export type SessionLogSortMode = "duration" | "start_time";
 
+const TOKEN_UNITS = [
+  { threshold: 1_000_000_000, suffix: "B" },
+  { threshold: 1_000_000, suffix: "M" },
+  { threshold: 1_000, suffix: "k" },
+];
+
+export function formatCompactTokens(count: number): string {
+  for (let i = 0; i < TOKEN_UNITS.length; i++) {
+    const { threshold, suffix } = TOKEN_UNITS[i];
+    if (count < threshold) continue;
+    const rounded = parseFloat((count / threshold).toFixed(2));
+    if (rounded >= 1000 && i > 0) return formatCompactTokens(TOKEN_UNITS[i - 1].threshold);
+    return `${rounded}${suffix}`;
+  }
+  return String(count);
+}
+
 type SortableSessionLog = { startTime: string; endTime: string; request_duration_ms?: number };
 
 const durationMs = (row: SortableSessionLog): number =>

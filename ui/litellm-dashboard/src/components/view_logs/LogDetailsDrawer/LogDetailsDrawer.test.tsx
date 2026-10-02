@@ -118,3 +118,31 @@ describe("LogDetailsDrawer session sidebar sorting", () => {
     await waitFor(() => expect(sidebarEventNames()).toEqual(["tool-early", "llm-late", "llm-early", "tool-late"]));
   });
 });
+
+describe("LogDetailsDrawer token summary", () => {
+  const renderWith = (props: Partial<React.ComponentProps<typeof LogDetailsDrawer>>) => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <LogDetailsDrawer open onClose={() => {}} logEntry={null} accessToken="token" {...props} />
+      </QueryClientProvider>,
+    );
+  };
+
+  it("shows the compacted sum of tokens across the session", async () => {
+    const logs = [
+      makeLog({ request_id: "a", total_tokens: 600_000 }),
+      makeLog({ request_id: "b", total_tokens: 700_000 }),
+    ];
+    vi.mocked(sessionSpendLogsCall).mockResolvedValue({ data: logs, total: 2, total_pages: 1 });
+    renderWith({ sessionId: "session-1" });
+
+    expect(await screen.findByText(/1\.3M tok/)).toBeDefined();
+  });
+
+  it("shows the compacted tokens of the single request outside session mode", async () => {
+    renderWith({ logEntry: makeLog({ request_id: "solo", total_tokens: 156_201 }) });
+
+    expect(await screen.findByText(/156\.2k tok/)).toBeDefined();
+  });
+});

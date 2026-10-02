@@ -11,7 +11,7 @@ import { LogDetailContent, GuardrailJumpLink } from "./LogDetailContent";
 import { sessionSpendLogsCall } from "../../networking";
 import { useQuery } from "@tanstack/react-query";
 import { getSpendString } from "@/utils/dataUtils";
-import { normalizeGuardrailEntries, sortSessionLogs, SessionLogSortMode } from "./utils";
+import { formatCompactTokens, normalizeGuardrailEntries, sortSessionLogs, SessionLogSortMode } from "./utils";
 import { DRAWER_WIDTH } from "./constants";
 import { useLogDetails } from "@/app/(dashboard)/hooks/logDetails/useLogDetails";
 
@@ -263,6 +263,7 @@ export function LogDetailsDrawer({
   const environment = metadata?.user_api_key_team_alias || "default";
 
   const totalSessionCost = sessionLogs.reduce((sum, row) => sum + (row.spend || 0), 0);
+  const totalSessionTokens = sessionLogs.reduce((sum, row) => sum + (row.total_tokens || 0), 0);
   const sessionStart =
     sessionLogs.length > 0 ? new Date(Math.min(...sessionLogs.map((r) => new Date(r.startTime).getTime()))) : null;
   const sessionEnd =
@@ -375,6 +376,8 @@ export function LogDetailsDrawer({
                 })}
                 <span className="mx-1.5">·</span>
                 {isSessionMode ? getSpendString(totalSessionCost) : getSpendString(currentLog.spend || 0)}
+                <span className="mx-1.5">·</span>
+                {formatCompactTokens(isSessionMode ? totalSessionTokens : currentLog.total_tokens || 0)} tok
                 {isSessionMode && (
                   <>
                     <span className="mx-1.5">·</span>
