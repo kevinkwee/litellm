@@ -170,7 +170,7 @@ def build_prompt(cfg: Config, failures: tuple[Failure, ...], tag: str) -> str:
         "failure (test id, the assertion/error, likely cause), unless an open "
         "ticket for that same test already exists -- do not create duplicates.\n"
         f"2. Fix it in {cfg.target_repo}, branching off {cfg.target_ref} and "
-        "following the repo's CONTRIBUTING and CLAUDE.md conventions (meaningful "
+        "following the repo's CONTRIBUTING and AGENTS.md conventions (meaningful "
         "regression coverage, conventional commits, run the suite locally), then "
         "open a PR that references the Linear ticket.\n"
         "3. Prefer one focused PR per failing test; if several share a root cause, "
