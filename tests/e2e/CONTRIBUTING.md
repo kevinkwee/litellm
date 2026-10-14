@@ -2,7 +2,7 @@
 
 This directory holds the live end-to-end suites that prove product correctness against a real running proxy and real provider APIs. The goal of this guide is simple: when you ship a feature, you add e2e coverage that walks that feature the way production does, across every route and edge case it touches, so a later change that breaks it fails here first
 
-Read this before adding a test and i recommend reading through CLAUDE.md
+Read this before adding a test and I recommend reading through the root `AGENTS.md`
 
 When contributing to this directory, please first discuss the change you wish to make via issue or pull request. We require screenshots and proof of your tests working on a live proxy. 
 
