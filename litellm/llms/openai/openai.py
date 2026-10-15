@@ -38,6 +38,7 @@ from litellm.litellm_core_utils.logging_utils import track_llm_api_timing
 from litellm.llms.base_llm.base_model_iterator import BaseModelResponseIterator
 from litellm.llms.base_llm.chat.transformation import BaseConfig, BaseLLMException
 from litellm.llms.bedrock.chat.invoke_handler import MockResponseIterator
+from litellm.llms.opencode.common_utils import apply_opencode_session_headers
 from litellm.types.utils import (
     EmbeddingResponse,
     ImageResponse,
@@ -636,6 +637,13 @@ class OpenAIChatCompletion(BaseLLM, BaseOpenAILLM):
 
             if headers:
                 inference_params["extra_headers"] = headers
+            opencode_headers = apply_opencode_session_headers(
+                headers=inference_params.get("extra_headers"),
+                api_base=api_base,
+                litellm_params=litellm_params,
+            )
+            if opencode_headers is not None:
+                inference_params["extra_headers"] = opencode_headers
             if model is None or messages is None:
                 raise OpenAIError(status_code=422, message="Missing model or messages")
 
@@ -850,6 +858,14 @@ class OpenAIChatCompletion(BaseLLM, BaseOpenAILLM):
         shared_session: Optional["ClientSession"] = None,
     ):
         response = None
+        opencode_headers = apply_opencode_session_headers(
+            headers=optional_params.get("extra_headers"),
+            api_base=api_base,
+            litellm_params=litellm_params,
+        )
+        if opencode_headers is not None:
+            optional_params = optional_params.copy()
+            optional_params["extra_headers"] = opencode_headers
         data = await provider_config.async_transform_request(
             model=model,
             messages=messages,
