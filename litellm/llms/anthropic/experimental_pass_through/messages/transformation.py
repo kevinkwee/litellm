@@ -26,6 +26,8 @@ from litellm.types.router import GenericLiteLLMParams
 from ...common_utils import (
     AnthropicError,
     AnthropicModelInfo,
+    is_anthropic_api_base,
+    is_anthropic_oauth_key,
     optionally_handle_anthropic_oauth,
     strip_advisor_blocks_from_messages,
 )
@@ -155,12 +157,27 @@ class AnthropicMessagesConfig(BaseAnthropicMessagesConfig):
         api_base: Optional[str] = None,
     ) -> Tuple[dict, Optional[str]]:
         # Check for Anthropic OAuth token in Authorization header
-        headers, api_key = optionally_handle_anthropic_oauth(headers=headers, api_key=api_key)
+        headers, api_key = optionally_handle_anthropic_oauth(headers=headers, api_key=api_key, api_base=api_base)
 
         if "x-api-key" not in headers and "authorization" not in headers:
-            auth_header = AnthropicModelInfo.get_auth_header(api_key)
-            if auth_header is not None:
-                headers.update(auth_header)
+            credential_is_safe = is_anthropic_api_base(api_base) or (
+                api_key is not None and not is_anthropic_oauth_key(api_key)
+            )
+            if credential_is_safe:
+                auth_header = AnthropicModelInfo.get_auth_header(api_key)
+                if auth_header is not None:
+                    headers.update(auth_header)
+            else:
+                resolved_key = AnthropicModelInfo.get_api_key()
+                resolved_auth = AnthropicModelInfo.get_auth_token() if resolved_key is None else None
+                if is_anthropic_oauth_key(resolved_key):
+                    resolved_key = None
+                if is_anthropic_oauth_key(resolved_auth):
+                    resolved_auth = None
+                if resolved_key is not None:
+                    headers.update(AnthropicModelInfo.get_auth_header(api_key=resolved_key))
+                elif resolved_auth is not None:
+                    headers["authorization"] = f"Bearer {resolved_auth}"
         if "anthropic-version" not in headers:
             headers["anthropic-version"] = DEFAULT_ANTHROPIC_API_VERSION
         if "content-type" not in headers:

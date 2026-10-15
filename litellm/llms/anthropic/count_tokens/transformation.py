@@ -53,12 +53,13 @@ class AnthropicCountTokensConfig:
 
         return request
 
-    def get_required_headers(self, api_key: str) -> Dict[str, str]:
+    def get_required_headers(self, api_key: str, api_base: Optional[str] = None) -> Dict[str, str]:
         """
         Get the required headers for the CountTokens API.
 
         Args:
             api_key: The Anthropic API key
+            api_base: Resolved api_base for the request. None keeps the official default
 
         Returns:
             Dictionary of required headers
@@ -73,7 +74,7 @@ class AnthropicCountTokensConfig:
             "anthropic-version": "2023-06-01",
             "anthropic-beta": ANTHROPIC_TOKEN_COUNTING_BETA_VERSION,
         }
-        headers, _ = optionally_handle_anthropic_oauth(headers=headers, api_key=api_key)
+        headers, _ = optionally_handle_anthropic_oauth(headers=headers, api_key=api_key, api_base=api_base)
         return headers
 
     def validate_request(self, model: str, messages: List[Dict[str, Any]]) -> None:

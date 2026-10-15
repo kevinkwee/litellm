@@ -5,6 +5,7 @@ This file contains common utils for anthropic calls.
 import copy
 import re
 from typing import Any, Dict, List, Optional, Union
+from urllib.parse import urlparse
 
 import httpx
 
@@ -63,20 +64,86 @@ def _merge_beta_headers(existing: Optional[str], new_beta: str) -> str:
     return ",".join(sorted(betas))
 
 
-def optionally_handle_anthropic_oauth(headers: dict, api_key: Optional[str]) -> tuple[dict, Optional[str]]:
+def is_anthropic_api_base(api_base: Optional[str]) -> bool:
+    """
+    Check whether the effective api_base is an official Anthropic API host.
+
+    An absent api_base resolves through the environment-configured base urls and
+    counts as official only when nothing is configured. A localhost api_base is
+    accepted when it matches the environment-configured base url.
+    """
+    from litellm.secret_managers.main import get_secret_str
+
+    configured_base = get_secret_str("ANTHROPIC_API_BASE") or get_secret_str("ANTHROPIC_BASE_URL")
+    resolved = api_base or configured_base
+    if not resolved:
+        return True
+    parsed = urlparse(resolved)
+    hostname = (parsed.hostname or "").lower()
+    if hostname == "anthropic.com" or hostname.endswith(".anthropic.com"):
+        return parsed.scheme.lower() == "https"
+    if (
+        configured_base is not None
+        and api_base is not None
+        and resolved.rstrip("/") == configured_base.rstrip("/")
+        and hostname in ("localhost", "127.0.0.1")
+    ):
+        return True
+    return False
+
+
+def _strip_anthropic_oauth(
+    headers: dict, api_key: Optional[str], api_base: Optional[str]
+) -> tuple[dict, Optional[str]]:
+    """Remove any Anthropic OAuth credential so it never reaches a non-Anthropic host."""
+    from litellm._logging import verbose_proxy_logger
+    from litellm.secret_managers.main import get_secret_str
+
+    effective_base = (
+        api_base or get_secret_str("ANTHROPIC_API_BASE") or get_secret_str("ANTHROPIC_BASE_URL") or "<default>"
+    )
+    verbose_proxy_logger.warning(
+        "Stripping Anthropic OAuth token from request to non-Anthropic api_base: %s", effective_base
+    )
+    for name in tuple(headers):
+        if name.lower() in ("authorization", "x-api-key") and is_anthropic_oauth_key(headers[name]):
+            headers.pop(name, None)
+    beta = headers.get("anthropic-beta")
+    if isinstance(beta, str):
+        remaining = ",".join(
+            b.strip() for b in beta.split(",") if b.strip() and b.strip() != ANTHROPIC_OAUTH_BETA_HEADER
+        )
+        if remaining:
+            headers["anthropic-beta"] = remaining
+        else:
+            headers.pop("anthropic-beta", None)
+    headers.pop("anthropic-dangerous-direct-browser-access", None)
+    if is_anthropic_oauth_key(api_key):
+        api_key = None
+    return headers, api_key
+
+
+def optionally_handle_anthropic_oauth(
+    headers: dict, api_key: Optional[str], api_base: Optional[str] = None
+) -> tuple[dict, Optional[str]]:
     """
     Handle Anthropic OAuth token detection and header setup.
 
     If an OAuth token is detected in the Authorization header, extracts it
-    and sets the required OAuth headers.
+    and sets the required OAuth headers. Requests headed to a non-Anthropic
+    api_base never carry the OAuth credential, so third-party gateways keep
+    the key their deployment was configured with.
 
     Args:
         headers: Request headers dict
         api_key: Current API key (may be None)
+        api_base: Resolved api_base for the request. None keeps the official default
 
     Returns:
         Tuple of (updated headers, api_key)
     """
+    if not is_anthropic_api_base(api_base):
+        return _strip_anthropic_oauth(headers=headers, api_key=api_key, api_base=api_base)
     # Check Authorization header (passthrough / forwarded requests)
     auth_header = headers.get("authorization", "")
     if auth_header and auth_header.startswith(f"Bearer {ANTHROPIC_OAUTH_TOKEN_PREFIX}"):
@@ -580,7 +647,7 @@ class AnthropicModelInfo(BaseLLMModelInfo):
             "accept": "application/json",
             "content-type": "application/json",
         }
-        if _is_oauth:
+        if _is_oauth and is_anthropic_api_base(api_base):
             headers["authorization"] = f"Bearer {api_key}"
             headers["anthropic-dangerous-direct-browser-access"] = "true"
             betas.add(ANTHROPIC_OAUTH_BETA_HEADER)
@@ -620,12 +687,19 @@ class AnthropicModelInfo(BaseLLMModelInfo):
             isinstance(litellm_params, dict) and litellm_params.get("use_bearer_for_custom_base", False)
         )
         # Check for Anthropic OAuth token in headers
-        headers, api_key = optionally_handle_anthropic_oauth(headers=headers, api_key=api_key)
+        headers, api_key = optionally_handle_anthropic_oauth(headers=headers, api_key=api_key, api_base=api_base)
         api_key = AnthropicModelInfo.get_api_key(api_key)
         # Resolve auth_token from ANTHROPIC_AUTH_TOKEN if api_key is not set
         auth_token: Optional[str] = None
         if api_key is None:
             auth_token = AnthropicModelInfo.get_auth_token()
+        # A non-Anthropic target never receives an OAuth-shaped credential, including
+        # one resurrected from the environment after the strip above. Fail closed.
+        if not is_anthropic_api_base(api_base):
+            if is_anthropic_oauth_key(api_key):
+                api_key = None
+            if is_anthropic_oauth_key(auth_token):
+                auth_token = None
         if api_key is None and auth_token is None:
             raise litellm.AuthenticationError(
                 message="Missing Anthropic API Key - A call is being made to anthropic but no key is set either in the environment variables or via params. Please set `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` in your environment vars",

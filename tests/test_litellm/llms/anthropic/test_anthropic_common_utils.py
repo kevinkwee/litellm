@@ -1724,3 +1724,308 @@ class TestClaudeOpus48AdaptiveThinking:
         from litellm.llms.anthropic.common_utils import AnthropicModelInfo
 
         assert AnthropicModelInfo._is_adaptive_thinking_model(model) is False
+
+
+class TestIsAnthropicApiBase:
+    """Tests for the official-host guard used by OAuth handling."""
+
+    def test_none_api_base_is_official(self, monkeypatch):
+        from litellm.llms.anthropic.common_utils import is_anthropic_api_base
+
+        monkeypatch.delenv("ANTHROPIC_API_BASE", raising=False)
+        monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+
+        assert is_anthropic_api_base(None) is True
+
+    def test_env_configured_third_party_base_is_not_official(self, monkeypatch):
+        from litellm.llms.anthropic.common_utils import is_anthropic_api_base
+
+        monkeypatch.setenv("ANTHROPIC_API_BASE", "https://my-relay.example.com/v1/messages")
+
+        assert is_anthropic_api_base(None) is False
+
+    def test_default_anthropic_host_is_official(self):
+        from litellm.llms.anthropic.common_utils import is_anthropic_api_base
+
+        assert is_anthropic_api_base("https://api.anthropic.com/v1/messages") is True
+
+    def test_anthropic_subdomain_is_official(self):
+        from litellm.llms.anthropic.common_utils import is_anthropic_api_base
+
+        assert is_anthropic_api_base("https://gateway.anthropic.com") is True
+
+    def test_plain_http_anthropic_host_is_not_official(self):
+        from litellm.llms.anthropic.common_utils import is_anthropic_api_base
+
+        assert is_anthropic_api_base("http://api.anthropic.com") is False
+
+    def test_lookalike_host_is_not_official(self):
+        from litellm.llms.anthropic.common_utils import is_anthropic_api_base
+
+        assert is_anthropic_api_base("https://not-anthropic.com") is False
+
+    def test_third_party_host_is_not_official(self):
+        from litellm.llms.anthropic.common_utils import is_anthropic_api_base
+
+        assert is_anthropic_api_base("https://my-relay.example.com/v1/messages") is False
+
+    def test_localhost_matches_env_configured_base(self, monkeypatch):
+        from litellm.llms.anthropic.common_utils import is_anthropic_api_base
+
+        monkeypatch.setenv("ANTHROPIC_API_BASE", "http://localhost:4000/v1/messages")
+
+        assert is_anthropic_api_base("http://localhost:4000/v1/messages") is True
+
+    def test_localhost_without_env_configured_base_is_not_official(self, monkeypatch):
+        from litellm.llms.anthropic.common_utils import is_anthropic_api_base
+
+        monkeypatch.delenv("ANTHROPIC_API_BASE", raising=False)
+        monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+
+        assert is_anthropic_api_base("http://localhost:4000/v1/messages") is False
+
+
+class TestOAuthHostScoping:
+    """OAuth credentials never reach non-Anthropic api_base hosts."""
+
+    THIRD_PARTY_BASE = "https://my-relay.example.com/v1/messages"
+
+    def test_third_party_base_strips_oauth_credential(self):
+        from litellm.llms.anthropic.common_utils import (
+            optionally_handle_anthropic_oauth,
+        )
+
+        headers = {
+            "authorization": f"Bearer {FAKE_OAUTH_TOKEN}",
+            "x-api-key": FAKE_REGULAR_KEY,
+            "anthropic-dangerous-direct-browser-access": "true",
+            "anthropic-beta": "prompt-caching-2024-07-31,oauth-2025-04-20",
+        }
+        updated_headers, returned_api_key = optionally_handle_anthropic_oauth(
+            headers=headers, api_key=FAKE_OAUTH_TOKEN, api_base=self.THIRD_PARTY_BASE
+        )
+
+        assert returned_api_key is None
+        assert "authorization" not in updated_headers
+        assert updated_headers["x-api-key"] == FAKE_REGULAR_KEY
+        assert updated_headers["anthropic-beta"] == "prompt-caching-2024-07-31"
+        assert "anthropic-dangerous-direct-browser-access" not in updated_headers
+
+    def test_third_party_base_keeps_non_oauth_deployment_key(self):
+        from litellm.llms.anthropic.common_utils import (
+            optionally_handle_anthropic_oauth,
+        )
+
+        headers = {"x-api-key": FAKE_REGULAR_KEY}
+        updated_headers, returned_api_key = optionally_handle_anthropic_oauth(
+            headers=headers, api_key=FAKE_REGULAR_KEY, api_base=self.THIRD_PARTY_BASE
+        )
+
+        assert returned_api_key == FAKE_REGULAR_KEY
+        assert updated_headers["x-api-key"] == FAKE_REGULAR_KEY
+
+    def test_official_base_still_stamps_oauth(self):
+        from litellm.llms.anthropic.common_utils import (
+            optionally_handle_anthropic_oauth,
+        )
+
+        headers = {"x-api-key": FAKE_OAUTH_TOKEN}
+        updated_headers, returned_api_key = optionally_handle_anthropic_oauth(
+            headers=headers,
+            api_key=FAKE_OAUTH_TOKEN,
+            api_base="https://api.anthropic.com/v1/messages",
+        )
+
+        assert returned_api_key == FAKE_OAUTH_TOKEN
+        assert "anthropic-beta" in updated_headers
+        assert "oauth-2025-04-20" in updated_headers["anthropic-beta"]
+        assert "anthropic-dangerous-direct-browser-access" in updated_headers
+        assert "x-api-key" not in updated_headers
+
+    def test_get_anthropic_headers_skips_oauth_on_third_party_base(self):
+        from litellm.llms.anthropic.common_utils import AnthropicModelInfo
+
+        config = AnthropicModelInfo()
+        headers = config.get_anthropic_headers(
+            api_key=FAKE_OAUTH_TOKEN,
+            computer_tool_used=False,
+            prompt_caching_set=False,
+            pdf_used=False,
+            is_vertex_request=False,
+            api_base=self.THIRD_PARTY_BASE,
+        )
+
+        assert "authorization" not in headers
+        assert "anthropic-dangerous-direct-browser-access" not in headers
+        assert "oauth-2025-04-20" not in headers.get("anthropic-beta", "")
+
+    def test_validate_environment_keeps_deployment_key_on_third_party_base(self):
+        from litellm.llms.anthropic.common_utils import AnthropicModelInfo
+
+        config = AnthropicModelInfo()
+        headers = config.validate_environment(
+            headers={},
+            model="claude-sonnet-4-5-20250929",
+            messages=[{"role": "user", "content": "Hello"}],
+            optional_params={},
+            litellm_params={"api_base": self.THIRD_PARTY_BASE},
+            api_key=FAKE_REGULAR_KEY,
+            api_base=self.THIRD_PARTY_BASE,
+        )
+
+        assert headers["x-api-key"] == FAKE_REGULAR_KEY
+        assert "oauth-2025-04-20" not in headers.get("anthropic-beta", "")
+
+    def test_count_tokens_third_party_base_strips_oauth_key(self):
+        from litellm.llms.anthropic.count_tokens.transformation import (
+            AnthropicCountTokensConfig,
+        )
+
+        config = AnthropicCountTokensConfig()
+        headers = config.get_required_headers(FAKE_OAUTH_TOKEN, api_base=self.THIRD_PARTY_BASE)
+
+        assert "x-api-key" not in headers
+        assert headers["anthropic-beta"] == "token-counting-2024-11-01"
+
+    def test_count_tokens_default_base_keeps_oauth_flow(self, monkeypatch):
+        from litellm.llms.anthropic.count_tokens.transformation import (
+            AnthropicCountTokensConfig,
+        )
+
+        monkeypatch.delenv("ANTHROPIC_API_BASE", raising=False)
+        monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+        config = AnthropicCountTokensConfig()
+        headers = config.get_required_headers(FAKE_OAUTH_TOKEN)
+
+        assert "x-api-key" not in headers
+        assert "oauth-2025-04-20" in headers["anthropic-beta"]
+
+    def test_none_base_with_env_relay_strips_oauth(self, monkeypatch):
+        """An unset api_base resolves to the env-configured host, which is a relay here."""
+        from litellm.llms.anthropic.common_utils import (
+            optionally_handle_anthropic_oauth,
+        )
+
+        monkeypatch.setenv("ANTHROPIC_API_BASE", self.THIRD_PARTY_BASE)
+        headers = {
+            "x-api-key": FAKE_OAUTH_TOKEN,
+            "anthropic-dangerous-direct-browser-access": "true",
+        }
+        updated_headers, returned_api_key = optionally_handle_anthropic_oauth(
+            headers=headers, api_key=FAKE_OAUTH_TOKEN, api_base=None
+        )
+
+        assert returned_api_key is None
+        assert "x-api-key" not in updated_headers
+        assert "anthropic-dangerous-direct-browser-access" not in updated_headers
+
+    def test_validate_environment_fails_closed_for_oauth_env_key_on_third_party(self, monkeypatch):
+        from litellm.llms.anthropic.common_utils import AnthropicModelInfo
+
+        config = AnthropicModelInfo()
+        monkeypatch.setenv("ANTHROPIC_API_KEY", FAKE_OAUTH_TOKEN)
+        with pytest.raises(Exception, match="Missing Anthropic API Key"):
+            config.validate_environment(
+                headers={},
+                model="claude-sonnet-4-5-20250929",
+                messages=[{"role": "user", "content": "Hello"}],
+                optional_params={},
+                litellm_params={},
+                api_key=None,
+                api_base=self.THIRD_PARTY_BASE,
+            )
+
+    def test_validate_environment_fails_closed_for_oauth_deployment_key_on_third_party(self, monkeypatch):
+        from litellm.llms.anthropic.common_utils import AnthropicModelInfo
+
+        config = AnthropicModelInfo()
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+        with pytest.raises(Exception, match="Missing Anthropic API Key"):
+            config.validate_environment(
+                headers={},
+                model="claude-sonnet-4-5-20250929",
+                messages=[{"role": "user", "content": "Hello"}],
+                optional_params={},
+                litellm_params={},
+                api_key=FAKE_OAUTH_TOKEN,
+                api_base=self.THIRD_PARTY_BASE,
+            )
+
+    def test_validate_environment_fails_closed_for_oauth_env_auth_token_on_third_party(self, monkeypatch):
+        from litellm.llms.anthropic.common_utils import AnthropicModelInfo
+
+        config = AnthropicModelInfo()
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", FAKE_OAUTH_TOKEN)
+        with pytest.raises(Exception, match="Missing Anthropic API Key"):
+            config.validate_environment(
+                headers={},
+                model="claude-sonnet-4-5-20250929",
+                messages=[{"role": "user", "content": "Hello"}],
+                optional_params={},
+                litellm_params={},
+                api_key=None,
+                api_base=self.THIRD_PARTY_BASE,
+            )
+
+    def test_validate_environment_keeps_non_oauth_env_key_on_third_party(self, monkeypatch):
+        """A regular env key is not OAuth shaped, so it reaches a third-party base."""
+        from litellm.llms.anthropic.common_utils import AnthropicModelInfo
+
+        config = AnthropicModelInfo()
+        monkeypatch.setenv("ANTHROPIC_API_KEY", FAKE_REGULAR_KEY)
+        headers = config.validate_environment(
+            headers={},
+            model="claude-sonnet-4-5-20250929",
+            messages=[{"role": "user", "content": "Hello"}],
+            optional_params={},
+            litellm_params={},
+            api_key=None,
+            api_base=self.THIRD_PARTY_BASE,
+        )
+
+        assert headers["x-api-key"] == FAKE_REGULAR_KEY
+        assert "authorization" not in headers
+        assert "oauth-2025-04-20" not in headers.get("anthropic-beta", "")
+
+    def test_passthrough_fails_closed_for_oauth_env_auth_token_on_third_party(self, monkeypatch):
+        from litellm.llms.anthropic.experimental_pass_through.messages.transformation import (
+            AnthropicMessagesConfig,
+        )
+
+        config = AnthropicMessagesConfig()
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", FAKE_OAUTH_TOKEN)
+        updated_headers, _ = config.validate_anthropic_messages_environment(
+            headers={},
+            model="claude-sonnet-4-5-20250929",
+            messages=[{"role": "user", "content": "Hello"}],
+            optional_params={},
+            litellm_params={},
+            api_key=None,
+            api_base=self.THIRD_PARTY_BASE,
+        )
+
+        assert "authorization" not in updated_headers
+        assert "x-api-key" not in updated_headers
+
+    def test_passthrough_keeps_non_oauth_env_auth_token_on_third_party(self, monkeypatch):
+        from litellm.llms.anthropic.experimental_pass_through.messages.transformation import (
+            AnthropicMessagesConfig,
+        )
+
+        config = AnthropicMessagesConfig()
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", FAKE_AUTH_TOKEN)
+        updated_headers, _ = config.validate_anthropic_messages_environment(
+            headers={},
+            model="claude-sonnet-4-5-20250929",
+            messages=[{"role": "user", "content": "Hello"}],
+            optional_params={},
+            litellm_params={},
+            api_key=None,
+            api_base=self.THIRD_PARTY_BASE,
+        )
+
+        assert updated_headers["authorization"] == f"Bearer {FAKE_AUTH_TOKEN}"
