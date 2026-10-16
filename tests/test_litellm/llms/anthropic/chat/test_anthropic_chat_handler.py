@@ -1,13 +1,19 @@
 import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 
 import litellm
 from litellm.constants import RESPONSE_FORMAT_TOOL_NAME
-from litellm.llms.anthropic.chat.handler import ModelResponseIterator, make_call
+from litellm.llms.anthropic.chat.handler import (
+    AnthropicChatCompletion,
+    ModelResponseIterator,
+    make_call,
+)
+from litellm.llms.anthropic.chat.transformation import CLAUDE_CODE_BILLING_PROMPT
 from litellm.types.llms.openai import (
     ChatCompletionToolCallChunk,
     ChatCompletionToolCallFunctionChunk,
@@ -2045,3 +2051,87 @@ def test_non_bash_tool_result_skipped():
     assert (
         len(code_results) == 0
     ), f"Expected 0 code_interpreter_results for text_editor result, got {len(code_results)}"
+
+OAUTH_KEY = "sk-ant-oat01-unit-test"
+CANNED_ANTHROPIC_RESPONSE = {
+    "id": "msg_funnel_test",
+    "type": "message",
+    "role": "assistant",
+    "model": "claude-sonnet-5-5",
+    "content": [{"type": "text", "text": "Hi"}],
+    "stop_reason": "end_turn",
+    "usage": {"input_tokens": 10, "output_tokens": 3},
+}
+
+
+def _run_completion_funnel(api_key: str | None, monkeypatch, headers: dict | None = None):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_BASE", raising=False)
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.delenv("LITELLM_ANTHROPIC_DISABLE_CLI_BILLING_SHIM", raising=False)
+
+    canned_response = httpx.Response(
+        200,
+        request=httpx.Request("POST", "https://api.anthropic.com/v1/messages"),
+        json=CANNED_ANTHROPIC_RESPONSE,
+    )
+    mock_client = MagicMock()
+    mock_client.post.return_value = canned_response
+
+    handler = AnthropicChatCompletion()
+    with patch("litellm.llms.anthropic.chat.handler._get_httpx_client", return_value=mock_client):
+        handler.completion(
+            model="claude-sonnet-5-5",
+            messages=[
+                {"role": "system", "content": "Answer with one word."},
+                {"role": "user", "content": "Say Hi"},
+            ],
+            api_base="https://api.anthropic.com/v1",
+            custom_llm_provider="anthropic",
+            custom_prompt_dict={},
+            model_response=litellm.ModelResponse(),
+            print_verbose=lambda *_args, **_kwargs: None,
+            encoding=None,
+            api_key=api_key,
+            logging_obj=MagicMock(),
+            optional_params={},
+            timeout=10.0,
+            litellm_params={},
+            headers=headers or {},
+        )
+    return mock_client
+
+
+def test_completion_funnel_prepends_claude_code_billing_prompt_for_oauth_token(monkeypatch):
+    mock_client = _run_completion_funnel(OAUTH_KEY, monkeypatch)
+
+    mock_client.post.assert_called_once()
+    body = json.loads(mock_client.post.call_args.kwargs["data"])
+    assert body["system"] == [
+        {"type": "text", "text": CLAUDE_CODE_BILLING_PROMPT},
+        {"type": "text", "text": "Answer with one word."},
+    ]
+
+
+def test_completion_funnel_keeps_regular_api_key_system_untouched(monkeypatch):
+    mock_client = _run_completion_funnel("sk-ant-api01-unit-test", monkeypatch)
+
+    mock_client.post.assert_called_once()
+    body = json.loads(mock_client.post.call_args.kwargs["data"])
+    assert body["system"] == [{"type": "text", "text": "Answer with one word."}]
+
+
+def test_completion_funnel_stamps_header_carried_oat_token(monkeypatch):
+    mock_client = _run_completion_funnel(
+        None,
+        monkeypatch,
+        headers={"authorization": f"Bearer {OAUTH_KEY}"},
+    )
+
+    mock_client.post.assert_called_once()
+    body = json.loads(mock_client.post.call_args.kwargs["data"])
+    assert body["system"] == [
+        {"type": "text", "text": CLAUDE_CODE_BILLING_PROMPT},
+        {"type": "text", "text": "Answer with one word."},
+    ]

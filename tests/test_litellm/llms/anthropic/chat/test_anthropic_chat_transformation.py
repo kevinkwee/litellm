@@ -17,7 +17,11 @@ from litellm.constants import (
     DEFAULT_REASONING_EFFORT_XHIGH_THINKING_BUDGET,
     RESPONSE_FORMAT_TOOL_NAME,
 )
-from litellm.llms.anthropic.chat.transformation import AnthropicConfig
+from litellm.llms.anthropic.chat.transformation import (
+    CLAUDE_CODE_BILLING_PROMPT,
+    AnthropicConfig,
+    prepend_claude_code_billing_system_block,
+)
 from litellm.llms.anthropic.experimental_pass_through.messages.transformation import (
     AnthropicMessagesConfig,
 )
@@ -5733,3 +5737,258 @@ def test_top_k_forwarded_at_transform_on_models_that_accept_it():
     )
 
     assert result["top_k"] == 40
+
+OAUTH_KEY = "sk-ant-oat01-unit-test"
+
+
+def _billing_prompt_chat_data(system=None) -> dict:
+    data = {
+        "model": "claude-sonnet-5-5",
+        "max_tokens": 16,
+        "messages": [{"role": "user", "content": "Hi"}],
+    }
+    if system is not None:
+        data["system"] = system
+    return data
+
+
+def _clear_anthropic_env_gate(monkeypatch) -> None:
+    monkeypatch.delenv("ANTHROPIC_API_BASE", raising=False)
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.delenv("LITELLM_ANTHROPIC_DISABLE_CLI_BILLING_SHIM", raising=False)
+
+
+def test_claude_code_billing_prompt_constant_pins_verified_cli_line():
+    assert (
+        CLAUDE_CODE_BILLING_PROMPT
+        == "x-anthropic-billing-header: cc_version=2.1.296.cf4; cc_entrypoint=sdk-cli;"
+    )
+
+
+def test_claude_code_billing_prompt_prepends_when_system_absent(monkeypatch):
+    _clear_anthropic_env_gate(monkeypatch)
+    data = _billing_prompt_chat_data()
+
+    result = prepend_claude_code_billing_system_block(
+        data=data,
+        api_key=OAUTH_KEY,
+        api_base="https://api.anthropic.com/v1",
+        headers={},
+    )
+
+    assert result["system"] == [{"type": "text", "text": CLAUDE_CODE_BILLING_PROMPT}]
+    assert result["messages"] == [{"role": "user", "content": "Hi"}]
+    assert "system" not in data
+
+
+def test_claude_code_billing_prompt_precedes_string_system_as_blocks(monkeypatch):
+    _clear_anthropic_env_gate(monkeypatch)
+    data = _billing_prompt_chat_data(system="Answer with one word.")
+
+    result = prepend_claude_code_billing_system_block(
+        data=data,
+        api_key=OAUTH_KEY,
+        api_base="https://api.anthropic.com/v1",
+        headers={},
+    )
+
+    assert result["system"] == [
+        {"type": "text", "text": CLAUDE_CODE_BILLING_PROMPT},
+        {"type": "text", "text": "Answer with one word."},
+    ]
+    assert data["system"] == "Answer with one word."
+
+
+def test_claude_code_billing_prompt_precedes_block_system_first(monkeypatch):
+    _clear_anthropic_env_gate(monkeypatch)
+    caller_block = {
+        "type": "text",
+        "text": "Answer with one word.",
+        "cache_control": {"type": "ephemeral"},
+    }
+    data = _billing_prompt_chat_data(system=[caller_block])
+
+    result = prepend_claude_code_billing_system_block(
+        data=data,
+        api_key=OAUTH_KEY,
+        api_base="https://api.anthropic.com/v1",
+        headers={},
+    )
+
+    assert result["system"][0] == {"type": "text", "text": CLAUDE_CODE_BILLING_PROMPT}
+    assert result["system"][1] is caller_block
+
+
+def test_claude_code_billing_prompt_skipped_for_regular_api_key(monkeypatch):
+    _clear_anthropic_env_gate(monkeypatch)
+    data = _billing_prompt_chat_data(system="Answer with one word.")
+
+    result = prepend_claude_code_billing_system_block(
+        data=data,
+        api_key="sk-ant-api01-unit-test",
+        api_base="https://api.anthropic.com/v1",
+        headers={},
+    )
+
+    assert result is data
+    assert result["system"] == "Answer with one word."
+
+
+def test_claude_code_billing_prompt_skipped_for_third_party_base(monkeypatch):
+    _clear_anthropic_env_gate(monkeypatch)
+    data = _billing_prompt_chat_data(system="Answer with one word.")
+
+    result = prepend_claude_code_billing_system_block(
+        data=data,
+        api_key=OAUTH_KEY,
+        api_base="https://my-gateway.example.com/v1",
+        headers={},
+    )
+
+    assert result is data
+
+
+def test_claude_code_billing_prompt_stamps_header_carried_oat_token(monkeypatch):
+    _clear_anthropic_env_gate(monkeypatch)
+
+    result = prepend_claude_code_billing_system_block(
+        data=_billing_prompt_chat_data(),
+        api_key=None,
+        api_base="https://api.anthropic.com/v1",
+        headers={"authorization": f"Bearer {OAUTH_KEY}"},
+    )
+
+    assert result["system"] == [{"type": "text", "text": CLAUDE_CODE_BILLING_PROMPT}]
+
+
+def test_claude_code_billing_prompt_skips_header_carried_regular_key(monkeypatch):
+    _clear_anthropic_env_gate(monkeypatch)
+    data = _billing_prompt_chat_data()
+
+    result = prepend_claude_code_billing_system_block(
+        data=data,
+        api_key=None,
+        api_base="https://api.anthropic.com/v1",
+        headers={"authorization": "Bearer sk-ant-api01-unit-test"},
+    )
+
+    assert result is data
+    assert "system" not in result
+
+
+def test_claude_code_billing_prompt_resolves_base_from_env(monkeypatch):
+    _clear_anthropic_env_gate(monkeypatch)
+
+    stamped = prepend_claude_code_billing_system_block(
+        data=_billing_prompt_chat_data(system="Answer with one word."),
+        api_key=OAUTH_KEY,
+        api_base=None,
+        headers={},
+    )
+
+    assert stamped["system"][0]["text"] == CLAUDE_CODE_BILLING_PROMPT
+
+
+def test_claude_code_billing_prompt_skipped_for_env_resolved_third_party_base(monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_BASE", raising=False)
+    monkeypatch.delenv("LITELLM_ANTHROPIC_DISABLE_CLI_BILLING_SHIM", raising=False)
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://my-gateway.example.com/v1")
+
+    data = _billing_prompt_chat_data()
+
+    result = prepend_claude_code_billing_system_block(
+        data=data,
+        api_key=OAUTH_KEY,
+        api_base=None,
+        headers={},
+    )
+
+    assert result is data
+    assert "system" not in result
+
+
+def test_claude_code_billing_prompt_skipped_when_caller_block_already_contains_it(monkeypatch):
+    _clear_anthropic_env_gate(monkeypatch)
+    data = _billing_prompt_chat_data(
+        system=[
+            {"type": "text", "text": CLAUDE_CODE_BILLING_PROMPT},
+            {"type": "text", "text": "Answer with one word."},
+        ]
+    )
+
+    result = prepend_claude_code_billing_system_block(
+        data=data,
+        api_key=OAUTH_KEY,
+        api_base="https://api.anthropic.com/v1",
+        headers={},
+    )
+
+    assert result is data
+    assert len(result["system"]) == 2
+
+
+def test_claude_code_billing_prompt_dedupes_on_prefix_of_newer_version_line(monkeypatch):
+    _clear_anthropic_env_gate(monkeypatch)
+    data = _billing_prompt_chat_data(
+        system=[
+            {"type": "text", "text": "x-anthropic-billing-header: cc_version=9.9.9; cc_entrypoint=cli;"},
+            {"type": "text", "text": "Answer with one word."},
+        ]
+    )
+
+    result = prepend_claude_code_billing_system_block(
+        data=data,
+        api_key=OAUTH_KEY,
+        api_base="https://api.anthropic.com/v1",
+        headers={},
+    )
+
+    assert result is data
+    assert len(result["system"]) == 2
+
+
+def test_claude_code_billing_prompt_skipped_when_caller_string_already_contains_it(monkeypatch):
+    _clear_anthropic_env_gate(monkeypatch)
+    data = _billing_prompt_chat_data(system=f"Preamble.\n{CLAUDE_CODE_BILLING_PROMPT}")
+
+    result = prepend_claude_code_billing_system_block(
+        data=data,
+        api_key=OAUTH_KEY,
+        api_base="https://api.anthropic.com/v1",
+        headers={},
+    )
+
+    assert result is data
+    assert result["system"] == f"Preamble.\n{CLAUDE_CODE_BILLING_PROMPT}"
+
+
+@pytest.mark.parametrize(
+    ("flag", "expect_stamp"),
+    [
+        ("1", False),
+        ("true", False),
+        ("TRUE", False),
+        ("yes", False),
+        ("0", True),
+        ("false", True),
+        (None, True),
+    ],
+)
+def test_claude_code_billing_prompt_kill_switch(monkeypatch, flag, expect_stamp):
+    if flag is None:
+        monkeypatch.delenv("LITELLM_ANTHROPIC_DISABLE_CLI_BILLING_SHIM", raising=False)
+    else:
+        monkeypatch.setenv("LITELLM_ANTHROPIC_DISABLE_CLI_BILLING_SHIM", flag)
+
+    data = _billing_prompt_chat_data()
+    result = prepend_claude_code_billing_system_block(
+        data=data,
+        api_key=OAUTH_KEY,
+        api_base="https://api.anthropic.com/v1",
+        headers={},
+    )
+
+    if expect_stamp:
+        assert result["system"] == [{"type": "text", "text": CLAUDE_CODE_BILLING_PROMPT}]
+    else:
+        assert result is data

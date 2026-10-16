@@ -614,7 +614,13 @@ OpenCode uses the session id for upstream routing and prompt-cache affinity. A s
 
 # Claude Code subscription (Pro/Max)
 
-Long-lived subscription tokens (`sk-ant-oat01-*` from `claude setup-token`) are served through a dedicated provider backed by the official Claude Agent SDK. Requests ride the genuine Claude Code client, so subscription OAuth, client identity, and the transient first-request 429 retry come from the real CLI instead of being forged by LiteLLM.
+Long-lived subscription tokens (`sk-ant-oat01-*` from `claude setup-token`) are served on the native `anthropic/` route with the full Messages API surface. Configure the token as the deployment's `api_key` (web UI credential or config file) and call it like any other Anthropic deployment: tools and tool choice, structured outputs, extended thinking, vision, PDF documents, prompt caching, and streaming all behave like a pay-per-token deployment, with usage and cost in the request logs.
+
+The route stamps such requests with the same billing-header line the Claude Code CLI puts at the head of its system prompt, because Anthropic rejects subscription traffic that lacks it with a 429 rate limit error even though the token is entirely valid. The stamp goes in as the first system text block and a caller's own system prompt is preserved behind it. Responses already carrying the line, typically a Claude Code CLI client forwarding through LiteLLM, are left untouched. Set the environment variable `LITELLM_ANTHROPIC_DISABLE_CLI_BILLING_SHIM` to any of `1`, `yes`, or `true` (case-insensitive) to opt out.
+
+The stamp is narrow: it applies only when the resolved credential is an `sk-ant-oat*` token and the target is an official Anthropic API host, including an env-configured default base url. On a third-party `api_base` the OAuth credential is stripped before it reaches that host and nothing is stamped.
+
+A provider backed by the official Claude Agent SDK remains available as a fallback for workloads limited to text and vision:
 
 ```yaml
 model_list:
@@ -635,9 +641,7 @@ The provider maps chat messages onto a single-turn SDK query with a strict shape
 
 Usage and cost appear in request logs like any other Anthropic deployment: the log shows the model the CLI reports with standard cost-map pricing (the list-price equivalent of plan-token consumption on a subscription). Streaming request logs pick the cost up from the final chunk.
 
-For the native `anthropic/` route, an OAuth token as the resolved credential keeps the OAuth beta headers only when the target host is an official Anthropic API host. A third-party `api_base` gets the OAuth credential stripped, so that deployment's configured key is what reaches it.
-
-Alternatives for subscription traffic: point Claude Code directly at the proxy with `forward_client_headers_to_llm_api: true` (the CLI then supplies its identity headers), or pass Claude Code identity headers per deployment via `extra_headers` on the native route as a best-effort experiment.
+Alternative access for subscription traffic: point Claude Code directly at the proxy with `forward_client_headers_to_llm_api: true`, since the CLI supplies its own identity headers and billing line.
 
 # Contributing
 

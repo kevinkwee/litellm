@@ -1,4 +1,5 @@
 import json
+import os
 import re
 import time
 from typing import (
@@ -93,6 +94,8 @@ from litellm.utils import (
 from ..common_utils import (
     AnthropicError,
     AnthropicModelInfo,
+    is_anthropic_api_base,
+    is_anthropic_oauth_key,
     process_anthropic_headers,
     strip_advisor_blocks_from_messages,
 )
@@ -103,6 +106,67 @@ if TYPE_CHECKING:
     LoggingClass = LiteLLMLoggingObj
 else:
     LoggingClass = Any
+
+CLAUDE_CODE_BILLING_PROMPT_PREFIX = "x-anthropic-billing-header:"
+CLAUDE_CODE_BILLING_PROMPT = f"{CLAUDE_CODE_BILLING_PROMPT_PREFIX} cc_version=2.1.296.cf4; cc_entrypoint=sdk-cli;"
+CLAUDE_CODE_BILLING_PROMPT_DISABLE_ENV = "LITELLM_ANTHROPIC_DISABLE_CLI_BILLING_SHIM"
+
+
+def _is_claude_code_billing_prompt_disabled() -> bool:
+    flag = os.environ.get(CLAUDE_CODE_BILLING_PROMPT_DISABLE_ENV)
+    return flag is not None and flag.strip().lower() in ("1", "true", "yes")
+
+
+def _system_has_claude_code_billing_prompt(system: object) -> bool:
+    if isinstance(system, str):
+        return CLAUDE_CODE_BILLING_PROMPT_PREFIX in system
+    if isinstance(system, list):
+        return any(
+            isinstance(block, dict)
+            and isinstance(block.get("text"), str)
+            and block.get("text").startswith(CLAUDE_CODE_BILLING_PROMPT_PREFIX)
+            for block in system
+        )
+    return False
+
+
+def _effective_credential_is_oauth(api_key: str | None, headers: dict) -> bool:
+    return is_anthropic_oauth_key(api_key) or is_anthropic_oauth_key(headers.get("authorization"))
+
+
+def prepend_claude_code_billing_system_block(
+    data: dict,
+    api_key: str | None,
+    api_base: str | None,
+    headers: dict,
+) -> dict:
+    """Prepend the Claude Code billing prompt for Anthropic subscription-token requests.
+
+    Anthropic 429-gates subscription (sk-ant-oat) traffic whose system prompt
+    lacks the billing-header line Claude Code prepends, regardless of valid
+    authentication. The block is always first, matching Claude Code's own
+    request shape, and a caller's system prompt is preserved behind it. The
+    credential may arrive as the deployment api_key or as a forwarded
+    authorization header, either of which authenticates as subscription
+    OAuth and therefore needs the billing block.
+    """
+    if _is_claude_code_billing_prompt_disabled() or not is_anthropic_api_base(api_base):
+        return data
+    if not _effective_credential_is_oauth(api_key, headers):
+        return data
+    if _system_has_claude_code_billing_prompt(data.get("system")):
+        return data
+
+    billing_block: dict[str, str] = {"type": "text", "text": CLAUDE_CODE_BILLING_PROMPT}
+    system = data.get("system")
+    merged: tuple[object, ...]
+    if isinstance(system, str):
+        merged = (billing_block, {"type": "text", "text": system})
+    elif isinstance(system, list):
+        merged = (billing_block, *system)
+    else:
+        merged = (billing_block,)
+    return {**data, "system": list(merged)}
 
 
 # Anthropic requires tool names to match ^[a-zA-Z0-9_-]{1,128}$. Any other

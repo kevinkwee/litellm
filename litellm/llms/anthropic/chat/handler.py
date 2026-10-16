@@ -64,7 +64,11 @@ from litellm.types.utils import (
 
 from ...base import BaseLLM
 from ..common_utils import AnthropicError, process_anthropic_headers
-from .transformation import ANTHROPIC_TOOL_NAME_REVERSE_MAP_KEY, AnthropicConfig
+from .transformation import (
+    ANTHROPIC_TOOL_NAME_REVERSE_MAP_KEY,
+    AnthropicConfig,
+    prepend_claude_code_billing_system_block,
+)
 
 if TYPE_CHECKING:
     from litellm.litellm_core_utils.streaming_handler import CustomStreamWrapper
@@ -382,6 +386,8 @@ class AnthropicChatCompletion(BaseLLM):
             request_data=data,
             provider=custom_llm_provider,
         )
+
+        data = prepend_claude_code_billing_system_block(data=data, api_key=api_key, api_base=api_base, headers=headers)
 
         ## LOGGING
         logging_obj.pre_call(
