@@ -5,6 +5,7 @@ SDK `query` function replaced by fakes that yield real SDK message objects, so
 no Claude Code CLI process is ever spawned.
 """
 
+import asyncio
 from typing import AsyncIterator
 
 import pytest
@@ -14,6 +15,10 @@ from claude_agent_sdk.types import AssistantMessage, ResultMessage, TextBlock
 from litellm.exceptions import APIError
 from litellm.integrations import claude_agent_sdk_provider as provider_module
 from litellm.utils import ModelResponse
+
+
+# Fake tokens for testing (not real secrets)
+FAKE_OAUTH_TOKEN = "sk-ant-oat01-fake-token-for-testing-123456789abcdef"
 
 
 def _assistant_message(text: list[str], error: str | None = None) -> AssistantMessage:
@@ -44,7 +49,7 @@ def _result_message(
 def _install_query(
     monkeypatch: pytest.MonkeyPatch, events: list[AssistantMessage | ResultMessage], captured: dict[str, object]
 ) -> None:
-    async def fake_query(*, prompt: str, options: object) -> AsyncIterator[object]:
+    async def fake_query(*, prompt: object, options: object) -> AsyncIterator[object]:
         captured["prompt"] = prompt
         captured["options"] = options
         for event in events:
@@ -96,6 +101,221 @@ def test_completion_maps_result_usage(monkeypatch: pytest.MonkeyPatch, provider_
     assert response.usage.prompt_tokens == 11
     assert response.usage.completion_tokens == 4
     assert response.usage.total_tokens == 15
+
+
+def test_response_model_reports_the_cli_model(monkeypatch: pytest.MonkeyPatch, provider_map: None) -> None:
+    captured: dict[str, object] = {}
+    _install_query(
+        monkeypatch,
+        [_assistant_message(["Hello world"]), _result_message({"input_tokens": 1, "output_tokens": 1})],
+        captured,
+    )
+
+    response = litellm.completion(model="claude-agent-sdk/claude-sonnet-5", messages=_messages())
+
+    assert response.model == "claude-sonnet-5"
+
+
+def test_cached_tokens_flow_into_usage_details(monkeypatch: pytest.MonkeyPatch, provider_map: None) -> None:
+    captured: dict[str, object] = {}
+    _install_query(
+        monkeypatch,
+        [
+            _assistant_message(["Hello world"]),
+            _result_message({"input_tokens": 11, "output_tokens": 4, "cache_read_input_tokens": 7}),
+        ],
+        captured,
+    )
+
+    response = litellm.completion(model="claude-agent-sdk/claude-sonnet-5", messages=_messages())
+
+    details = response.usage.prompt_tokens_details
+    assert details is not None
+    assert details.cached_tokens == 7
+
+
+def test_oauth_shaped_api_key_wires_the_cli_token_env(monkeypatch: pytest.MonkeyPatch, provider_map: None) -> None:
+    captured: dict[str, object] = {}
+    _install_query(
+        monkeypatch,
+        [_assistant_message(["ok"]), _result_message()],
+        captured,
+    )
+
+    litellm.completion(
+        model="claude-agent-sdk/claude-sonnet-5",
+        messages=_messages(),
+        api_key=FAKE_OAUTH_TOKEN,
+    )
+
+    options = captured["options"]
+    assert options.env == {
+        "CLAUDE_CODE_OAUTH_TOKEN": FAKE_OAUTH_TOKEN,
+        "ANTHROPIC_API_KEY": "",
+        "ANTHROPIC_AUTH_TOKEN": "",
+    }
+
+
+def test_regular_api_key_wires_the_anthropic_env(monkeypatch: pytest.MonkeyPatch, provider_map: None) -> None:
+    captured: dict[str, object] = {}
+    _install_query(
+        monkeypatch,
+        [_assistant_message(["ok"]), _result_message()],
+        captured,
+    )
+
+    litellm.completion(
+        model="claude-agent-sdk/claude-sonnet-5",
+        messages=_messages(),
+        api_key="sk-ant-api03-regular-key-for-testing-123456789",
+    )
+
+    options = captured["options"]
+    assert options.env == {
+        "ANTHROPIC_API_KEY": "sk-ant-api03-regular-key-for-testing-123456789",
+        "CLAUDE_CODE_OAUTH_TOKEN": "",
+        "ANTHROPIC_AUTH_TOKEN": "",
+    }
+
+
+def test_missing_api_key_leaves_the_cli_env_untouched(monkeypatch: pytest.MonkeyPatch, provider_map: None) -> None:
+    captured: dict[str, object] = {}
+    _install_query(
+        monkeypatch,
+        [_assistant_message(["ok"]), _result_message()],
+        captured,
+    )
+
+    litellm.completion(model="claude-agent-sdk/claude-sonnet-5", messages=_messages())
+
+    options = captured["options"]
+    assert options.env == {}
+
+
+def _drain_prompt(prompt: object) -> list[dict[str, object]]:
+    async def _collect() -> list[dict[str, object]]:
+        if isinstance(prompt, str):
+            return [{"type": "user", "message": {"role": "user", "content": prompt}}]
+        return [message async for message in prompt]
+
+    return asyncio.run(_collect())
+
+
+def test_image_messages_go_over_the_stream_json_input(monkeypatch: pytest.MonkeyPatch, provider_map: None) -> None:
+    captured: dict[str, object] = {}
+    _install_query(
+        monkeypatch,
+        [_assistant_message(["I see it"]), _result_message({"input_tokens": 5, "output_tokens": 2})],
+        captured,
+    )
+    data_url = "data:image/png;base64,aGVsbG8="
+    messages: list[dict[str, object]] = [
+        {"role": "system", "content": "be brief"},
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "what is this?"},
+                {"type": "image_url", "image_url": {"url": data_url}},
+            ],
+        },
+    ]
+
+    response = litellm.completion(model="claude-agent-sdk/claude-sonnet-5", messages=messages)
+
+    assert response.choices[0].message.content == "I see it"
+    user_inputs = _drain_prompt(captured["prompt"])
+    assert len(user_inputs) == 1
+    prompt_content = user_inputs[0]["message"]["content"]
+    image_blocks = [block for block in prompt_content if block["type"] == "image"]
+    assert len(image_blocks) == 1
+    assert image_blocks[0]["source"] == {"type": "base64", "media_type": "image/png", "data": "aGVsbG8="}
+    text_blocks = [block for block in prompt_content if block["type"] == "text"]
+    assert [block["text"] for block in text_blocks] == ["Human: what is this?"]
+    assert user_inputs[0]["message"]["role"] == "user"
+
+
+def test_https_image_url_is_downloaded_and_inlined(monkeypatch: pytest.MonkeyPatch, provider_map: None) -> None:
+    captured: dict[str, object] = {}
+    _install_query(
+        monkeypatch,
+        [_assistant_message(["ok"]), _result_message()],
+        captured,
+    )
+
+    def fake_convert_url_to_base64(url: str) -> str:
+        return "data:image/png;base64,aGVsbG8="
+
+    monkeypatch.setattr(provider_module, "convert_url_to_base64", fake_convert_url_to_base64)
+    messages: list[dict[str, object]] = [
+        {"role": "user", "content": [{"type": "image_url", "image_url": {"url": "https://example.com/cat.png"}}]}
+    ]
+
+    litellm.completion(model="claude-agent-sdk/claude-sonnet-5", messages=messages)
+
+    prompt_content = _drain_prompt(captured["prompt"])[0]["message"]["content"]
+    image_blocks = [block for block in prompt_content if block["type"] == "image"]
+    assert image_blocks[0]["source"] == {"type": "base64", "media_type": "image/png", "data": "aGVsbG8="}
+
+
+@pytest.mark.parametrize(
+    "unsupported_type,label",
+    [("input_audio", "audio"), ("file", "file"), ("document", "document")],
+)
+def test_unsupported_content_parts_are_rejected(
+    monkeypatch: pytest.MonkeyPatch, provider_map: None, unsupported_type: str, label: str
+) -> None:
+    captured: dict[str, object] = {}
+    _install_query(monkeypatch, [], captured)
+    messages: list[dict[str, object]] = [
+        {"role": "user", "content": [{"type": unsupported_type}]},
+    ]
+
+    with pytest.raises(APIError) as exc_info:
+        litellm.completion(model="claude-agent-sdk/claude-sonnet-5", messages=messages)
+
+    assert exc_info.value.status_code == 400
+    assert label in str(exc_info.value)
+
+
+def test_completion_attaches_response_cost(monkeypatch: pytest.MonkeyPatch, provider_map: None) -> None:
+    captured: dict[str, object] = {}
+    _install_query(
+        monkeypatch,
+        [_assistant_message(["Hello world"]), _result_message({"input_tokens": 1000, "output_tokens": 100})],
+        captured,
+    )
+
+    def fake_completion_cost(completion_response: object) -> float:
+        return 0.003
+
+    monkeypatch.setattr(litellm, "completion_cost", fake_completion_cost)
+
+    response = litellm.completion(model="claude-agent-sdk/claude-sonnet-5", messages=_messages())
+
+    hidden = getattr(response, "_hidden_params", None) or {}
+    assert hidden.get("response_cost") == 0.003
+
+
+async def test_streaming_final_chunk_carries_response_cost(monkeypatch: pytest.MonkeyPatch, provider_map: None) -> None:
+    captured: dict[str, object] = {}
+    _install_query(
+        monkeypatch,
+        [_assistant_message(["Hello world"]), _result_message({"input_tokens": 1000, "output_tokens": 100})],
+        captured,
+    )
+
+    def fake_completion_cost(completion_response: object) -> float:
+        return 0.003
+
+    monkeypatch.setattr(litellm, "completion_cost", fake_completion_cost)
+
+    chunks = [
+        chunk
+        for chunk in litellm.completion(model="claude-agent-sdk/claude-sonnet-5", messages=_messages(), stream=True)
+    ]
+
+    costs = [getattr(chunk, "response_cost", None) for chunk in chunks]
+    assert 0.003 in costs
 
 
 async def test_acompletion_awaits_sdk_query(monkeypatch: pytest.MonkeyPatch, provider_map: None) -> None:

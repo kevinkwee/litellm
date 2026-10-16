@@ -627,9 +627,13 @@ litellm_settings:
     - {"provider": "claude-agent-sdk", "custom_handler": "litellm.integrations.claude_agent_sdk_provider.claude_agent_sdk_provider"}
 ```
 
-Set the token through the `CLAUDE_CODE_OAUTH_TOKEN` environment variable of the proxy process. The deployment image needs Node with the Claude Code CLI (`npm install -g @anthropic-ai/claude-code`). The pip dependency ships in the `extra_proxy` extra.
+Credentials work like any other deployment: set the `api_key` field of the deployment (web UI credential or config), and the token is wired into the CLI process environment for that deployment only, as `CLAUDE_CODE_OAUTH_TOKEN` for `sk-ant-oat01-*` tokens or `ANTHROPIC_API_KEY` for regular Anthropic keys. With no deployment `api_key`, the provider falls back to the proxy process's own `CLAUDE_CODE_OAUTH_TOKEN` environment variable, so one subscription token can still serve many deployments.
 
-The provider maps chat messages onto a single-turn SDK query with a strict shape: built-in tools are disabled, the caller's system prompt replaces the Claude Code default, and no filesystem settings or MCP servers are loaded, so token usage stays at the caller's content size. Tool calls, vision, and structured outputs are not supported on this route, and each call pays one CLI process spin-up of latency. Subscription traffic consumes tokens from the plan rather than per-token billing, so no cost-map entry exists for `claude-agent-sdk/*` models and the dashboard reports their cost as zero while token usage is still tracked.
+The deployment image needs Node with the Claude Code CLI (`npm install -g @anthropic-ai/claude-code`). The pip dependency ships in the `extra_proxy` extra.
+
+The provider maps chat messages onto a single-turn SDK query with a strict shape: built-in tools are disabled, the caller's system prompt replaces the Claude Code default, and no filesystem settings or MCP servers are loaded, so token usage stays at the caller's content size. Vision works through the image content blocks of chat messages: data URLs are decoded in place, and remote `http(s)://` image URLs are downloaded and inlined as base64 sources during request handling. Tool calls and structured outputs are not supported on this route, and each call pays one CLI process spin-up of latency.
+
+Usage and cost appear in request logs like any other Anthropic deployment: the log shows the model the CLI reports with standard cost-map pricing (the list-price equivalent of plan-token consumption on a subscription). Streaming request logs pick the cost up from the final chunk.
 
 For the native `anthropic/` route, an OAuth token as the resolved credential keeps the OAuth beta headers only when the target host is an official Anthropic API host. A third-party `api_base` gets the OAuth credential stripped, so that deployment's configured key is what reaches it.
 

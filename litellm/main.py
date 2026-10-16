@@ -35,6 +35,7 @@ from typing import (
     Literal,
     Mapping,
     Optional,
+    Sequence,
     Tuple,
     Type,
     Union,
@@ -8394,6 +8395,34 @@ def stream_chunk_builder_text_completion(chunks: list, messages: Optional[List] 
     return TextCompletionResponse(**response)
 
 
+def _hoist_provider_response_cost(response: ModelResponse, chunks: Sequence[object]) -> None:
+    """Lift a provider-supplied response_cost onto the assembled stream response.
+
+    Custom providers report cost through the final chunk's provider_specific_fields,
+    which chunk_creator spreads onto the processed chunk as attributes, so the
+    assembled stream response has to rediscover and honor it before the logging
+    cost calculator runs.
+    """
+    if response._hidden_params.get("response_cost") is not None:  # pyright: ignore[reportPrivateUsage]  # ModelResponse private field, codebase-wide convention
+        return
+    for chunk in reversed(list(chunks)):
+        response_cost: object = None
+        if isinstance(chunk, dict):
+            candidate: object = chunk.get("provider_specific_fields")
+            if isinstance(candidate, dict):
+                response_cost = candidate.get("response_cost")
+        else:
+            candidate = getattr(chunk, "response_cost", None)
+            if not isinstance(candidate, (int, float)):
+                attr_fields = getattr(chunk, "provider_specific_fields", None)
+                response_cost = attr_fields.get("response_cost") if isinstance(attr_fields, dict) else None
+            else:
+                response_cost = candidate
+        if isinstance(response_cost, (int, float)) and response_cost > 0:
+            response._hidden_params["response_cost"] = float(response_cost)  # pyright: ignore[reportPrivateUsage]  # ModelResponse private field, codebase-wide convention
+            return
+
+
 def stream_chunk_builder(
     chunks: list,
     messages: Optional[list] = None,
@@ -8487,6 +8516,8 @@ def stream_chunk_builder(
                         hidden["provider_specific_fields"]
                     )
                     break
+
+            _hoist_provider_response_cost(response, chunks)
 
             if litellm.include_cost_in_streaming_usage and logging_obj is not None:
                 setattr(
@@ -8661,6 +8692,8 @@ def stream_chunk_builder(
                     hidden["provider_specific_fields"]
                 )
                 break
+
+        _hoist_provider_response_cost(response, chunks)
 
         # Add cost to usage object if include_cost_in_streaming_usage is True
         if litellm.include_cost_in_streaming_usage and logging_obj is not None:
