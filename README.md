@@ -635,7 +635,7 @@ litellm_settings:
 
 Credentials work like any other deployment: set the `api_key` field of the deployment (web UI credential or config), and the token is wired into the CLI process environment for that deployment only, as `CLAUDE_CODE_OAUTH_TOKEN` for `sk-ant-oat01-*` tokens or `ANTHROPIC_API_KEY` for regular Anthropic keys. With no deployment `api_key`, the provider falls back to the proxy process's own `CLAUDE_CODE_OAUTH_TOKEN` environment variable, so one subscription token can still serve many deployments.
 
-The deployment image needs Node with the Claude Code CLI (`npm install -g @anthropic-ai/claude-code`). The pip dependency ships in the `extra_proxy` extra.
+The pip dependency ships in the `extra_proxy` extra, and every platform wheel vendors its own Claude Code CLI binary, so this provider needs no Node and no global CLI install in the image.
 
 The provider maps chat messages onto a single-turn SDK query with a strict shape: built-in tools are disabled, the caller's system prompt replaces the Claude Code default, and no filesystem settings or MCP servers are loaded, so token usage stays at the caller's content size. Vision works through the image content blocks of chat messages: data URLs are decoded in place, and remote `http(s)://` image URLs are downloaded and inlined as base64 sources during request handling. Tool calls and structured outputs are not supported on this route, and each call pays one CLI process spin-up of latency.
 

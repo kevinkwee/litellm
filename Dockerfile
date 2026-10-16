@@ -96,10 +96,8 @@ FROM $LITELLM_RUNTIME_IMAGE AS runtime
 
 USER root
 
-# node and npm are required by the prisma CLI and the Claude Code CLI at runtime
-RUN apk add --no-cache bash openssl tzdata nodejs npm python3 libsndfile
-
-RUN npm install -g @anthropic-ai/claude-code@2.1.296
+# node (without npm) is required by the prisma CLI at runtime
+RUN apk add --no-cache bash openssl tzdata nodejs python3 libsndfile
 
 WORKDIR /app
 ENV PATH="/app/.venv/bin:${PATH}"
