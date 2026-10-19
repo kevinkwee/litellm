@@ -14,6 +14,7 @@ from litellm.llms.anthropic.chat.handler import (
     make_call,
 )
 from litellm.llms.anthropic.chat.transformation import CLAUDE_CODE_BILLING_PROMPT
+from litellm.litellm_core_utils.streaming_handler import CustomStreamWrapper
 from litellm.types.llms.openai import (
     ChatCompletionToolCallChunk,
     ChatCompletionToolCallFunctionChunk,
@@ -50,6 +51,58 @@ async def test_make_call_passes_logging_obj_to_client_post():
     mock_client.post.assert_called_once()
     call_kwargs = mock_client.post.call_args[1]
     assert call_kwargs.get("logging_obj") is logging_obj
+
+
+@pytest.mark.asyncio
+async def test_make_call_attaches_http_response_to_iterator():
+    mock_client = AsyncMock()
+    mock_response = MagicMock()
+    mock_response.aiter_lines = MagicMock(return_value=MagicMock())
+    mock_client.post.return_value = mock_response
+
+    completion_stream, _ = await make_call(
+        client=mock_client,
+        api_base="https://api.anthropic.com/v1/messages",
+        headers={},
+        data="{}",
+        model="claude-3-5-haiku",
+        messages=[{"role": "user", "content": "Hi"}],
+        logging_obj=MagicMock(),
+        timeout=60.0,
+        json_mode=False,
+    )
+
+    assert completion_stream.http_response is mock_response
+
+
+@pytest.mark.asyncio
+async def test_model_response_iterator_aclose_closes_http_response():
+    mock_response = MagicMock()
+    mock_response.aclose = AsyncMock()
+    iterator = ModelResponseIterator(streaming_response=MagicMock(), sync_stream=False)
+    iterator.http_response = mock_response
+
+    await iterator.aclose()
+
+    mock_response.aclose.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_custom_stream_wrapper_aclose_closes_anthropic_http_response():
+    mock_response = MagicMock()
+    mock_response.aclose = AsyncMock()
+    iterator = ModelResponseIterator(streaming_response=MagicMock(), sync_stream=False)
+    iterator.http_response = mock_response
+    wrapper = CustomStreamWrapper(
+        completion_stream=iterator,
+        model="claude-3-5-haiku",
+        logging_obj=MagicMock(),
+        custom_llm_provider="anthropic",
+    )
+
+    await wrapper.aclose()
+
+    mock_response.aclose.assert_awaited_once()
 
 
 def test_redacted_thinking_content_block_delta():

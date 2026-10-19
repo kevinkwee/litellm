@@ -123,6 +123,7 @@ async def make_call(
         speed=speed,
         tool_name_reverse_map=tool_name_reverse_map,
     )
+    completion_stream.http_response = response
 
     # LOGGING
     logging_obj.post_call(
@@ -584,6 +585,11 @@ class ModelResponseIterator:
         self.tool_results: List[Dict[str, Any]] = []
         self._current_server_tool_id: str | None = None
         self._container_id: str | None = None
+        self.http_response: httpx.Response | None = None
+
+    async def aclose(self) -> None:
+        if self.http_response is not None:
+            await self.http_response.aclose()
 
     def check_empty_tool_call_args(self) -> bool:
         """
