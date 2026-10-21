@@ -392,16 +392,17 @@ class MistralConfig(OpenAIGPTConfig):
     @classmethod
     def _strip_output_only_fields(cls, message: AllMessageValues) -> AllMessageValues:
         """
-        ``reasoning_content`` and ``thinking_blocks`` are output-only fields that
-        LiteLLM attaches to assistant responses. Mistral's input schema forbids
-        unknown fields, so replaying them verbatim in a follow-up turn triggers a
-        422 ``extra_forbidden``. Drop them before the request is sent.
+        ``reasoning_content``, ``reasoning`` and ``thinking_blocks`` are
+        reasoning fields that LiteLLM normalizes from assistant responses.
+        Mistral's input schema forbids unknown fields, so replaying them
+        verbatim in a follow-up turn triggers a 422 ``extra_forbidden``. Drop
+        them before the request is sent.
         """
         if message["role"] != "assistant":
             return message
         return cast(
             AllMessageValues,
-            {k: v for k, v in message.items() if k not in ("reasoning_content", "thinking_blocks")},
+            {k: v for k, v in message.items() if k not in ("reasoning_content", "reasoning", "thinking_blocks")},
         )
 
     @classmethod

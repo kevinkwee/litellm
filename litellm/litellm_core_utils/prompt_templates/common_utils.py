@@ -1538,16 +1538,16 @@ def _rename_message_reasoning_field(
     message: AllMessageValues,
     target_field: str,
 ) -> AllMessageValues:
-    if not any(field in message for field in _REASONING_MESSAGE_FIELDS):
+    message_fields = cast(Mapping[str, object], message)  # cast-ok: TypedDict union rejects variable-key access
+    present_values = tuple(message_fields[field] for field in _REASONING_MESSAGE_FIELDS if field in message_fields)
+    if not present_values:
         return message
-    source_field = next(
-        (field for field in _REASONING_MESSAGE_FIELDS if message.get(field)),
-        None,
-    )
-    stripped = {k: v for k, v in message.items() if k not in _REASONING_MESSAGE_FIELDS}
-    if source_field is None:
+    stripped = {key: value for key, value in message_fields.items() if key not in _REASONING_MESSAGE_FIELDS}
+    reasoning_values = tuple(value for value in present_values if value is not None)
+    if not reasoning_values:
         return cast(AllMessageValues, stripped)  # cast-ok: same keys as source message minus reasoning
-    return cast(AllMessageValues, {**stripped, target_field: message[source_field]})  # cast-ok: subset of source keys
+    reasoning_value = next((value for value in reasoning_values if value), reasoning_values[0])
+    return cast(AllMessageValues, {**stripped, target_field: reasoning_value})  # cast-ok: subset of source keys
 
 
 def _extract_base64_data(image_url: str) -> str:
