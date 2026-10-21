@@ -616,32 +616,11 @@ OpenCode uses the session id for upstream routing and prompt-cache affinity. A s
 
 Long-lived subscription tokens (`sk-ant-oat01-*` from `claude setup-token`) are served on the native `anthropic/` route with the full Messages API surface. Configure the token as the deployment's `api_key` (web UI credential or config file) and call it like any other Anthropic deployment: tools and tool choice, structured outputs, extended thinking, vision, PDF documents, prompt caching, and streaming all behave like a pay-per-token deployment, with usage and cost in the request logs.
 
-The route stamps such requests with the same billing-header line the Claude Code CLI puts at the head of its system prompt, because Anthropic rejects subscription traffic that lacks it with a 429 rate limit error even though the token is entirely valid. The stamp goes in as the first system text block and a caller's own system prompt is preserved behind it. Responses already carrying the line, typically a Claude Code CLI client forwarding through LiteLLM, are left untouched. Set the environment variable `LITELLM_ANTHROPIC_DISABLE_CLI_BILLING_SHIM` to any of `1`, `yes`, or `true` (case-insensitive) to opt out.
+The route stamps such requests with the same billing-header line the Claude Code CLI puts at the head of its system prompt, because Anthropic rejects subscription traffic that lacks it with a 429 rate limit error even though the token is entirely valid. The stamp goes in as the first system text block and a caller's own system prompt is preserved behind it. Requests that already carry the line, typically from a Claude Code CLI client forwarding through LiteLLM, are left untouched. Set the environment variable `LITELLM_ANTHROPIC_DISABLE_CLI_BILLING_SHIM` to any of `1`, `yes`, or `true` (case-insensitive) to opt out.
 
 The stamp is narrow: it applies only when the resolved credential is an `sk-ant-oat*` token and the target is an official Anthropic API host, including an env-configured default base url. On a third-party `api_base` the OAuth credential is stripped before it reaches that host and nothing is stamped.
 
-A provider backed by the official Claude Agent SDK remains available as a fallback for workloads limited to text and vision:
-
-```yaml
-model_list:
-  - model_name: claude-sub-sonnet
-    litellm_params:
-      model: claude-agent-sdk/claude-sonnet-5
-
-litellm_settings:
-  custom_provider_map:
-    - {"provider": "claude-agent-sdk", "custom_handler": "litellm.integrations.claude_agent_sdk_provider.claude_agent_sdk_provider"}
-```
-
-Credentials work like any other deployment: set the `api_key` field of the deployment (web UI credential or config), and the token is wired into the CLI process environment for that deployment only, as `CLAUDE_CODE_OAUTH_TOKEN` for `sk-ant-oat01-*` tokens or `ANTHROPIC_API_KEY` for regular Anthropic keys. With no deployment `api_key`, the provider falls back to the proxy process's own `CLAUDE_CODE_OAUTH_TOKEN` environment variable, so one subscription token can still serve many deployments.
-
-The pip dependency ships in the `extra_proxy` extra, and every platform wheel vendors its own Claude Code CLI binary, so this provider needs no Node and no global CLI install in the image.
-
-The provider maps chat messages onto a single-turn SDK query with a strict shape: built-in tools are disabled, the caller's system prompt replaces the Claude Code default, and no filesystem settings or MCP servers are loaded, so token usage stays at the caller's content size. Vision works through the image content blocks of chat messages: data URLs are decoded in place, and remote `http(s)://` image URLs are downloaded and inlined as base64 sources during request handling. Tool calls and structured outputs are not supported on this route, and each call pays one CLI process spin-up of latency.
-
-Usage and cost appear in request logs like any other Anthropic deployment: the log shows the model the CLI reports with standard cost-map pricing (the list-price equivalent of plan-token consumption on a subscription). Streaming request logs pick the cost up from the final chunk.
-
-Alternative access for subscription traffic: point Claude Code directly at the proxy with `forward_client_headers_to_llm_api: true`, since the CLI supplies its own identity headers and billing line.
+Claude Code itself can also go through the proxy with `forward_client_headers_to_llm_api: true`, since the CLI supplies its own identity headers and billing line.
 
 # Contributing
 
