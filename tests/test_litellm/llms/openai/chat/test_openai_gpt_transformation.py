@@ -835,3 +835,39 @@ class TestAssistantReasoningField:
                 },
                 headers={},
             )
+
+    @staticmethod
+    def _empty_reasoning_tool_messages():
+        return [
+            {"role": "user", "content": "hi"},
+            {
+                "role": "assistant",
+                "content": None,
+                "reasoning_content": "",
+                "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "f", "arguments": "{}"}}],
+            },
+            {"role": "tool", "tool_call_id": "call_1", "content": "result"},
+        ]
+
+    def test_empty_reasoning_content_survives_transform(self):
+        body = self.config.transform_request(
+            model="deepseek-v4-flash",
+            messages=self._empty_reasoning_tool_messages(),
+            optional_params={},
+            litellm_params={"custom_llm_provider": "openai", "api_base": "https://api.deepseek.com/v1"},
+            headers={},
+        )
+
+        assert body["messages"][1]["reasoning_content"] == ""
+
+    @pytest.mark.asyncio
+    async def test_empty_reasoning_content_survives_async_transform(self):
+        body = await self.config.async_transform_request(
+            model="deepseek-v4-flash",
+            messages=self._empty_reasoning_tool_messages(),
+            optional_params={},
+            litellm_params={"custom_llm_provider": "openai", "api_base": "https://api.deepseek.com/v1"},
+            headers={},
+        )
+
+        assert body["messages"][1]["reasoning_content"] == ""

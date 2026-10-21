@@ -711,8 +711,8 @@ class TestApplyAssistantReasoningField:
     client-facing field is ``reasoning_content``, so a per-deployment rename
     is needed on the way out. The helper must also accept either inbound
     spelling (clients may send ``reasoning``), leave non-assistant messages
-    alone, invent nothing when no reasoning is present, and reject unknown
-    target fields."""
+    alone, invent nothing when no reasoning is present, forward a reasoning
+    value that is present but empty, and reject unknown target fields."""
 
     def test_default_field_untouched(self):
         messages = [
@@ -815,15 +815,65 @@ class TestApplyAssistantReasoningField:
 
         assert messages == snapshot
 
-    def test_empty_string_reasoning_is_dropped(self):
+    def test_empty_string_reasoning_is_kept(self):
         messages = [
             {"role": "assistant", "content": "answer", "reasoning_content": ""},
         ]
 
         result = _apply_assistant_reasoning_field(messages, "reasoning")
 
+        assert result[0]["reasoning"] == ""
+        assert "reasoning_content" not in result[0]
+
+    def test_empty_string_reasoning_kept_on_default_field(self):
+        messages = [
+            {"role": "assistant", "content": "answer", "reasoning": ""},
+        ]
+
+        result = _apply_assistant_reasoning_field(messages, None)
+
+        assert result[0]["reasoning_content"] == ""
+        assert "reasoning" not in result[0]
+
+    def test_none_reasoning_is_dropped(self):
+        messages = [
+            {"role": "assistant", "content": "answer", "reasoning_content": None},
+        ]
+
+        result = _apply_assistant_reasoning_field(messages, "reasoning")
+
         assert "reasoning" not in result[0]
         assert "reasoning_content" not in result[0]
+
+    def test_both_spellings_empty_keeps_one_field(self):
+        messages = [
+            {"role": "assistant", "content": "answer", "reasoning_content": "", "reasoning": ""},
+        ]
+
+        result = _apply_assistant_reasoning_field(messages, "reasoning")
+
+        assert result[0]["reasoning"] == ""
+        assert "reasoning_content" not in result[0]
+
+    def test_non_empty_spelling_wins_over_empty_one(self):
+        messages = [
+            {"role": "assistant", "content": "answer", "reasoning_content": "", "reasoning": "thoughts"},
+        ]
+
+        result = _apply_assistant_reasoning_field(messages, "reasoning_content")
+
+        assert result[0]["reasoning_content"] == "thoughts"
+        assert "reasoning" not in result[0]
+
+    def test_reasoning_content_wins_over_reasoning_when_both_are_non_empty(self):
+        messages = [
+            {"role": "assistant", "content": "answer", "reasoning_content": "first", "reasoning": "second"},
+        ]
+
+        result = _apply_assistant_reasoning_field(messages, "reasoning_content")
+
+        assert result[0]["reasoning_content"] == "first"
+        assert "reasoning" not in result[0]
 
     def test_multiple_assistant_messages(self):
         messages = [
