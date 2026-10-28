@@ -18,6 +18,15 @@ from litellm.proxy.hooks.proxy_track_cost_callback import (
 )
 
 
+class _SpendWriterSpy:
+    """Stands in for the DB spend writer so the tests can observe which write
+    path the failure hook takes."""
+
+    def __init__(self):
+        self.update_database = AsyncMock()
+        self.insert_spend_log_only = AsyncMock()
+
+
 @pytest.mark.asyncio
 async def test_async_post_call_failure_hook():
     # Setup
@@ -81,6 +90,80 @@ async def test_async_post_call_failure_hook():
         assert metadata["status"] == "failure"
         assert "error_information" in metadata
         assert metadata["original_key"] == "original_value"
+
+
+@pytest.mark.asyncio
+async def test_async_post_call_failure_hook_writes_only_spend_log_for_unrecognized_credential():
+    """
+    A credential that matches no key still gets its spend log row but no daily
+    rollup rows, since there is no user, team or org to attribute spend to.
+    """
+    logger = _ProxyDBLogger()
+
+    user_api_key_dict = UserAPIKeyAuth(
+        api_key="guessed-key",
+        is_unrecognized_credential=True,
+    )
+
+    request_data = {
+        "model": "",
+        "metadata": {},
+        "litellm_params": {},
+    }
+
+    fake_writer = _SpendWriterSpy()
+
+    with patch(
+        "litellm.proxy.proxy_server.proxy_logging_obj.db_spend_update_writer",
+        fake_writer,
+    ):
+        await logger.async_post_call_failure_hook(
+            request_data=request_data,
+            original_exception=Exception("Invalid proxy server token passed"),
+            user_api_key_dict=user_api_key_dict,
+        )
+
+    assert fake_writer.update_database.await_count == 0
+    fake_writer.insert_spend_log_only.assert_awaited_once()
+    call_args = fake_writer.insert_spend_log_only.call_args[1]
+    assert call_args["kwargs"]["litellm_params"]["metadata"]["status"] == "failure"
+
+
+@pytest.mark.asyncio
+async def test_async_post_call_failure_hook_keeps_full_path_for_resolved_identity():
+    """
+    Only unresolvable credentials skip the daily rollups. A failure raised after
+    auth resolved a real key must keep them.
+    """
+    logger = _ProxyDBLogger()
+
+    user_api_key_dict = UserAPIKeyAuth(
+        api_key="expired-key",
+        user_id="user-456",
+        team_id="team-123",
+    )
+
+    request_data = {
+        "model": "gpt-4o",
+        "metadata": {},
+        "litellm_params": {},
+    }
+
+    fake_writer = _SpendWriterSpy()
+
+    with patch(
+        "litellm.proxy.proxy_server.proxy_logging_obj.db_spend_update_writer",
+        fake_writer,
+    ):
+        await logger.async_post_call_failure_hook(
+            request_data=request_data,
+            original_exception=Exception("Authentication Error - Expired Key"),
+            user_api_key_dict=user_api_key_dict,
+        )
+
+    assert fake_writer.insert_spend_log_only.await_count == 0
+    fake_writer.update_database.assert_awaited_once()
+    assert fake_writer.update_database.call_args[1]["user_id"] == "user-456"
 
 
 @pytest.mark.asyncio

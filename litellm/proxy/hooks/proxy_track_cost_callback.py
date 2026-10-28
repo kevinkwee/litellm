@@ -154,6 +154,16 @@ class _ProxyDBLogger(CustomLogger):
         if isinstance(request_data.get("combined_usage_object"), litellm.Usage):
             recovered_response_cost = max(float(request_data.get("response_cost") or 0.0), 0.0)
 
+        if user_api_key_dict.is_unrecognized_credential:
+            await proxy_logging_obj.db_spend_update_writer.insert_spend_log_only(
+                kwargs=request_data,
+                completion_response=original_exception,
+                start_time=actual_start_time,
+                end_time=datetime.now(),
+                response_cost=recovered_response_cost,
+            )
+            return
+
         await proxy_logging_obj.db_spend_update_writer.update_database(
             token=user_api_key_dict.api_key,
             response_cost=recovered_response_cost,

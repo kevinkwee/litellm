@@ -6,6 +6,7 @@ import pytest
 
 from litellm.proxy._types import UserAPIKeyAuth, hash_token
 from litellm.proxy.auth.resolvers.exceptions import (
+    KeyNotFoundError,
     NoDatabaseConnectionError,
     PrincipalMissingSourceKeyError,
 )
@@ -68,3 +69,19 @@ async def test_resolve_raises_without_a_db_connection():
     store = IdentityStore(None, _FakeCache())
     with pytest.raises(NoDatabaseConnectionError):
         await store.resolve(hashed_token="missing")
+
+
+class _FakePrismaWithoutKeys:
+    """A database with no verification token rows, so every lookup misses."""
+
+    async def get_data(self, *args, **kwargs):
+        return None
+
+
+async def test_resolve_raises_key_not_found_when_cache_and_db_miss():
+    """The spend logger keys its "no identity to attribute to" decision off this
+    exception type, so a cache and DB miss must keep raising KeyNotFoundError."""
+    store = IdentityStore(_FakePrismaWithoutKeys(), _FakeCache())
+
+    with pytest.raises(KeyNotFoundError):
+        await store.resolve(hashed_token=hash_token("sk-guessed-key"))

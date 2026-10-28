@@ -1818,3 +1818,115 @@ async def test_update_database_does_not_deepcopy_on_request_path():
     fake_payload["nested"]["a"] = 999
     assert batch_payload["model"] == "gpt-4"
     assert batch_payload["nested"]["a"] == 1
+
+
+@pytest.mark.asyncio
+async def test_insert_spend_log_only_skips_every_spend_update():
+    """
+    The spend-log-only path writes the spend log row and no spend updates or
+    daily rollups, since a request rejected before an identity is resolved has
+    nothing to attribute spend to.
+    """
+    db_writer = DBSpendUpdateWriter()
+    db_writer._insert_spend_log_to_db = AsyncMock()
+    db_writer._batch_database_updates = AsyncMock()
+    db_writer._enqueue_tool_registry_upsert = MagicMock()
+
+    with (
+        patch("litellm.proxy.proxy_server.disable_spend_logs", False),
+        patch("litellm.proxy.proxy_server.prisma_client", MagicMock()),
+        patch("litellm.proxy.proxy_server.general_settings", {}),
+        patch(
+            "litellm.proxy.db.db_spend_update_writer.asyncio.create_task"
+        ) as mock_create_task,
+    ):
+        await db_writer.insert_spend_log_only(
+            kwargs={
+                "model": "",
+                "custom_llm_provider": "",
+                "litellm_params": {"metadata": {"status": "failure"}},
+            },
+            completion_response=Exception("Invalid proxy server token passed"),
+            start_time=datetime.now(),
+            end_time=datetime.now(),
+            response_cost=0.0,
+        )
+
+    db_writer._insert_spend_log_to_db.assert_awaited_once()
+    db_writer._batch_database_updates.assert_not_awaited()
+    db_writer._enqueue_tool_registry_upsert.assert_not_called()
+    mock_create_task.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_insert_spend_log_only_respects_disabled_spend_logs():
+    db_writer = DBSpendUpdateWriter()
+    db_writer._insert_spend_log_to_db = AsyncMock()
+
+    with (
+        patch("litellm.proxy.proxy_server.disable_spend_logs", True),
+        patch("litellm.proxy.proxy_server.prisma_client", MagicMock()),
+        patch("litellm.proxy.proxy_server.general_settings", {}),
+    ):
+        await db_writer.insert_spend_log_only(
+            kwargs={"model": "", "litellm_params": {"metadata": {"status": "failure"}}},
+            completion_response=Exception("Invalid proxy server token passed"),
+            start_time=datetime.now(),
+            end_time=datetime.now(),
+            response_cost=0.0,
+        )
+
+    db_writer._insert_spend_log_to_db.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_insert_spend_log_only_respects_disabled_spend_updates():
+    db_writer = DBSpendUpdateWriter()
+    db_writer._insert_spend_log_to_db = AsyncMock()
+
+    with (
+        patch("litellm.proxy.proxy_server.disable_spend_logs", False),
+        patch("litellm.proxy.proxy_server.prisma_client", MagicMock()),
+        patch(
+            "litellm.proxy.proxy_server.general_settings",
+            {"disable_spend_updates": True},
+        ),
+    ):
+        await db_writer.insert_spend_log_only(
+            kwargs={"model": "", "litellm_params": {"metadata": {"status": "failure"}}},
+            completion_response=Exception("Invalid proxy server token passed"),
+            start_time=datetime.now(),
+            end_time=datetime.now(),
+            response_cost=0.0,
+        )
+
+    db_writer._insert_spend_log_to_db.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_insert_spend_log_only_swallows_payload_failure():
+    db_writer = DBSpendUpdateWriter()
+    db_writer._insert_spend_log_to_db = AsyncMock()
+
+    with (
+        patch("litellm.proxy.proxy_server.disable_spend_logs", False),
+        patch("litellm.proxy.proxy_server.prisma_client", MagicMock()),
+        patch("litellm.proxy.proxy_server.general_settings", {}),
+        patch(
+            "litellm.proxy.db.db_spend_update_writer._build_spend_log_payload",
+            side_effect=ValueError("cannot build payload"),
+        ),
+        patch(
+            "litellm.proxy.db.db_spend_update_writer.spend_log_error"
+        ) as mock_spend_log_error,
+    ):
+        await db_writer.insert_spend_log_only(
+            kwargs={"model": "", "litellm_params": {}},
+            completion_response=Exception("Invalid proxy server token passed"),
+            start_time=datetime.now(),
+            end_time=datetime.now(),
+            response_cost=0.0,
+        )
+
+    mock_spend_log_error.assert_called_once()
+    db_writer._insert_spend_log_to_db.assert_not_awaited()

@@ -157,8 +157,9 @@ async def test_cleanup_old_spend_logs_batch_deletion():
     mock_prisma_client = MagicMock()
     mock_db = MagicMock()
 
-    # Mock execute_raw to return deleted counts
-    mock_db.execute_raw = AsyncMock(side_effect=[1000, 500, 0])
+    # Mock execute_raw to return deleted counts (3 spend-log batches, then the
+    # tool-index cleanup's first batch returning 0)
+    mock_db.execute_raw = AsyncMock(side_effect=[1000, 500, 0, 0])
 
     # Wire up mocks
     mock_prisma_client.db = mock_db
@@ -178,7 +179,7 @@ async def test_cleanup_old_spend_logs_batch_deletion():
     await cleaner.cleanup_old_spend_logs(mock_prisma_client)
 
     # Validate batching and deletion via raw SQL
-    assert mock_db.execute_raw.call_count == 3
+    assert mock_db.execute_raw.call_count == 4
 
     # Check the first call argument
     call_args_sql = mock_db.execute_raw.call_args_list[0][0][0]
@@ -187,6 +188,35 @@ async def test_cleanup_old_spend_logs_batch_deletion():
     # request_id alone is not unique, and deleting by it would let a client
     # reusing x-litellm-call-id take out a fresh row alongside the expired one
     assert 'WHERE ("request_id", "startTime") IN' in call_args_sql
+
+    # After spend logs, the derived tool index rows expire on the same cutoff
+    tool_index_sql = mock_db.execute_raw.call_args_list[3][0][0]
+    assert 'DELETE FROM "LiteLLM_SpendLogToolIndex"' in tool_index_sql
+
+
+@pytest.mark.asyncio
+async def test_cleanup_deletes_expired_tool_index_rows_by_start_time():
+    """
+    Expired tool index rows are deleted on the same cutoff as the spend logs
+    they are derived from.
+    """
+    mock_prisma_client = MagicMock()
+    mock_prisma_client.db.execute_raw = AsyncMock(side_effect=[0, 100, 0])
+
+    cleaner = SpendLogCleanup(
+        general_settings={"maximum_spend_logs_retention_period": "1d"}
+    )
+    cleaner.pod_lock_manager = MagicMock()
+    cleaner.pod_lock_manager.redis_cache = None
+
+    await cleaner.cleanup_old_spend_logs(mock_prisma_client)
+
+    spend_log_call, tool_index_call = mock_prisma_client.db.execute_raw.call_args_list[:2]
+    tool_index_sql = tool_index_call[0][0]
+    assert 'DELETE FROM "LiteLLM_SpendLogToolIndex"' in tool_index_sql
+    assert 'WHERE ("request_id", "tool_name") IN' in tool_index_sql
+    assert 'WHERE "start_time" < $1::timestamptz' in tool_index_sql
+    assert tool_index_call[0][1] == spend_log_call[0][1]
 
 
 @pytest.mark.asyncio
@@ -258,6 +288,10 @@ async def test_cleanup_drops_partitions_when_enabled_and_partitioned():
     partition_manager.drop_partitions_older_than.assert_awaited_once()
     delete_sql = mock_prisma_client.db.execute_raw.call_args_list[0][0][0]
     assert 'DELETE FROM "LiteLLM_SpendLogs"' in delete_sql
+    # Partition drops only reclaim spend logs. The tool index must still be
+    # cleaned row-wise on the same run
+    all_sql = [c[0][0] for c in mock_prisma_client.db.execute_raw.call_args_list]
+    assert any('DELETE FROM "LiteLLM_SpendLogToolIndex"' in s for s in all_sql)
 
 
 @pytest.mark.asyncio
@@ -270,7 +304,7 @@ async def test_cleanup_uses_delete_when_partitioning_not_enabled():
     from unittest.mock import AsyncMock, MagicMock
 
     mock_prisma_client = MagicMock()
-    mock_prisma_client.db.execute_raw = AsyncMock(side_effect=[10, 0])
+    mock_prisma_client.db.execute_raw = AsyncMock(side_effect=[10, 0, 0])
 
     partition_manager = MagicMock()
     partition_manager.is_partitioned = AsyncMock(return_value=True)
@@ -301,7 +335,7 @@ async def test_cleanup_uses_delete_when_not_partitioned():
     from unittest.mock import AsyncMock, MagicMock
 
     mock_prisma_client = MagicMock()
-    mock_prisma_client.db.execute_raw = AsyncMock(side_effect=[10, 0])
+    mock_prisma_client.db.execute_raw = AsyncMock(side_effect=[10, 0, 0])
 
     partition_manager = MagicMock()
     partition_manager.is_partitioned = AsyncMock(return_value=False)
@@ -320,7 +354,7 @@ async def test_cleanup_uses_delete_when_not_partitioned():
     await cleaner.cleanup_old_spend_logs(mock_prisma_client)
 
     partition_manager.drop_partitions_older_than.assert_not_awaited()
-    assert mock_prisma_client.db.execute_raw.await_count == 2
+    assert mock_prisma_client.db.execute_raw.await_count == 3
     delete_sql = mock_prisma_client.db.execute_raw.call_args_list[0][0][0]
     assert 'DELETE FROM "LiteLLM_SpendLogs"' in delete_sql
 
