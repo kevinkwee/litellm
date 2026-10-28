@@ -25,8 +25,10 @@ sys.path.insert(
 )  # Adds the parent directory to the system path
 
 from litellm._logging import verbose_proxy_logger
+from litellm.exceptions import BudgetExceededError
 from litellm.proxy._types import ProxyErrorTypes, ProxyException, UserAPIKeyAuth
 from litellm.proxy.auth.auth_exception_handler import UserAPIKeyAuthExceptionHandler
+from litellm.proxy.auth.resolvers.exceptions import KeyNotFoundError
 
 
 @pytest.mark.asyncio
@@ -409,6 +411,7 @@ async def test_resolved_identity_exported_on_auth_failure():
     assert logged.metadata == {"foo": "bar"}
     assert logged.team_metadata == {"baz": "qux"}
     assert logged.request_route == "/v1/chat/completions"
+    assert logged.is_unrecognized_credential is False
 
     # And it is stamped onto the span eagerly, before the request is rejected.
     mock_seed.assert_called_once()
@@ -419,9 +422,9 @@ async def test_resolved_identity_exported_on_auth_failure():
 
 @pytest.mark.asyncio
 async def test_auth_failure_without_resolved_identity_still_logs():
-    """When auth fails before any identity is resolved (e.g. an unknown key),
-    the handler must still log a usable object carrying the raw api key and
-    route, not crash on the missing identity."""
+    """When auth fails before any identity is resolved, the handler must still
+    log a usable object carrying the hashed api key and route, not crash on the
+    missing identity."""
     handler = UserAPIKeyAuthExceptionHandler()
 
     with (
@@ -458,3 +461,80 @@ async def test_auth_failure_without_resolved_identity_still_logs():
     assert logged.api_key != "sk-unknown"
     assert logged.api_key == UserAPIKeyAuth(api_key="sk-unknown").api_key
     assert logged.request_route == "/v1/chat/completions"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "auth_failure",
+    [
+        BudgetExceededError(current_cost=10.0, max_budget=1.0),
+        HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="not a virtual key"),
+        Exception("No api key passed in."),
+        Exception("Malformed API Key passed in. Ensure Key has `****** prefix."),
+        ProxyException(
+            message="Authentication Error - Expired Key.",
+            type=ProxyErrorTypes.expired_key,
+            param="sk-...",
+            code=status.HTTP_401_UNAUTHORIZED,
+        ),
+    ],
+)
+async def test_non_lookup_failures_keep_full_spend_path(auth_failure):
+    """A failure that is not a key lookup miss keeps its daily rollups, so
+    is_unrecognized_credential must stay False for every rejection type."""
+    handler = UserAPIKeyAuthExceptionHandler()
+
+    with (
+        patch("litellm.proxy.auth.auth_exception_handler.seed_request_identity"),
+        patch(
+            "litellm.proxy.proxy_server.proxy_logging_obj.post_call_failure_hook",
+            new_callable=AsyncMock,
+            return_value=None,
+        ) as mock_hook,
+        patch(
+            "litellm.proxy.proxy_server.general_settings",
+            {"allow_requests_on_db_unavailable": False},
+        ),
+    ):
+        with pytest.raises(ProxyException):
+            await handler._handle_authentication_error(
+                auth_failure,
+                MagicMock(),
+                {},
+                "/v1/chat/completions",
+                None,
+                "sk-real-key",
+            )
+
+    assert mock_hook.call_args[1]["user_api_key_dict"].is_unrecognized_credential is False
+
+
+@pytest.mark.asyncio
+async def test_key_not_found_marks_credential_unrecognized():
+    """A key lookup miss means no identity exists for the credential, so its
+    failures must skip daily rollups."""
+    handler = UserAPIKeyAuthExceptionHandler()
+
+    with (
+        patch("litellm.proxy.auth.auth_exception_handler.seed_request_identity"),
+        patch(
+            "litellm.proxy.proxy_server.proxy_logging_obj.post_call_failure_hook",
+            new_callable=AsyncMock,
+            return_value=None,
+        ) as mock_hook,
+        patch(
+            "litellm.proxy.proxy_server.general_settings",
+            {"allow_requests_on_db_unavailable": False},
+        ),
+    ):
+        with pytest.raises(KeyNotFoundError):
+            await handler._handle_authentication_error(
+                KeyNotFoundError("hashed-guessed-key"),
+                MagicMock(),
+                {},
+                "/v1/models",
+                None,
+                "sk-guessed",
+            )
+
+    assert mock_hook.call_args[1]["user_api_key_dict"].is_unrecognized_credential is True

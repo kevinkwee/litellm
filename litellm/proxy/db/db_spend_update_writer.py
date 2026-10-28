@@ -94,6 +94,38 @@ def _extract_cache_creation_tokens(usage_obj: dict) -> int:
     return int(details.get("cache_write_tokens", 0) or details.get("cache_creation_tokens", 0) or 0)
 
 
+def _build_spend_log_payload(
+    kwargs: Optional[dict[str, object]],
+    completion_response: object,
+    start_time: Optional[datetime],
+    end_time: Optional[datetime],
+    response_cost: Optional[float],
+    team_id: Optional[str],
+    org_id: Optional[str],
+) -> SpendLogsPayload:
+    from litellm.proxy.spend_tracking.spend_tracking_utils import get_logging_payload
+
+    payload = get_logging_payload(
+        kwargs=kwargs,
+        response_obj=completion_response,
+        start_time=start_time,
+        end_time=end_time,
+    )
+    payload["spend"] = response_cost or 0.0
+    if isinstance(payload["startTime"], datetime):
+        payload["startTime"] = payload["startTime"].isoformat()
+    if isinstance(payload["endTime"], datetime):
+        payload["endTime"] = payload["endTime"].isoformat()
+
+    if org_id is not None and org_id != "":
+        payload["organization_id"] = org_id
+
+    if team_id is not None and team_id != "":
+        payload["team_id"] = team_id
+
+    return payload
+
+
 class DBSpendUpdateWriter:
     """
     Module responsible for
@@ -153,27 +185,15 @@ class DBSpendUpdateWriter:
                 hashed_token = token
 
             ## CREATE SPEND LOG PAYLOAD ##
-            from litellm.proxy.spend_tracking.spend_tracking_utils import (
-                get_logging_payload,
-            )
-
-            payload = get_logging_payload(
+            payload = _build_spend_log_payload(
                 kwargs=kwargs,
-                response_obj=completion_response,
+                completion_response=completion_response,
                 start_time=start_time,
                 end_time=end_time,
+                response_cost=response_cost,
+                team_id=team_id,
+                org_id=org_id,
             )
-            payload["spend"] = response_cost or 0.0
-            if isinstance(payload["startTime"], datetime):
-                payload["startTime"] = payload["startTime"].isoformat()
-            if isinstance(payload["endTime"], datetime):
-                payload["endTime"] = payload["endTime"].isoformat()
-
-            if org_id is not None and org_id != "":
-                payload["organization_id"] = org_id
-
-            if team_id is not None and team_id != "":
-                payload["team_id"] = team_id
 
             if disable_spend_logs is False:
                 await self._insert_spend_log_to_db(
@@ -220,6 +240,50 @@ class DBSpendUpdateWriter:
                 team_id,
                 org_id,
                 end_user_id,
+            )
+
+    async def insert_spend_log_only(
+        self,
+        kwargs: dict[str, object],
+        completion_response: Exception,
+        start_time: Optional[datetime],
+        end_time: Optional[datetime],
+        response_cost: Optional[float],
+    ) -> None:
+        """
+        Write the spend log row for a rejected request while skipping every spend
+        update and daily rollup.
+
+        Used when the credential matches no stored key, so there is no user, team
+        or org to attribute spend to. The daily tables would otherwise collect one
+        never-expiring row per guessed credential.
+        """
+        from litellm.proxy.proxy_server import disable_spend_logs, prisma_client
+        from litellm.proxy.utils import ProxyUpdateSpend
+
+        try:
+            if ProxyUpdateSpend.disable_spend_updates() is True:
+                return
+            if disable_spend_logs is not False:
+                verbose_proxy_logger.debug(
+                    "disable_spend_logs=True. Skipping spend log for an unrecognized credential."
+                )
+                return
+
+            payload = _build_spend_log_payload(
+                kwargs=kwargs,
+                completion_response=completion_response,
+                start_time=start_time,
+                end_time=end_time,
+                response_cost=response_cost,
+                team_id=None,
+                org_id=None,
+            )
+            await self._insert_spend_log_to_db(payload=payload, prisma_client=prisma_client)
+        except Exception:
+            spend_log_error(
+                "Spend tracking - insert_spend_log_only failed. response_cost=%s",
+                response_cost,
             )
 
     def _enqueue_tool_registry_upsert(
